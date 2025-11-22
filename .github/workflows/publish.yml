@@ -1,4 +1,4 @@
-name: Publish to npm
+name: Publish to npmjs & GitHub Packages
 
 on:
   push:
@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: write
       id-token: write
     steps:
       - name: Checkout code
@@ -28,7 +29,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Get package version
         id: package-version
@@ -37,47 +37,99 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Current package version: $VERSION"
 
-      - name: Check if version exists on npm
-        id: check-version
+      - name: Check if version exists on npmjs
+        id: check-npmjs
         run: |
           VERSION=${{ steps.package-version.outputs.version }}
-          if npm view calendar-build@$VERSION version >/dev/null 2>&1; then
+          if npm view @dytsou/calendar-build@$VERSION version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
             echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Version $VERSION already exists on npm, skipping publish"
+            echo "Version $VERSION already exists on npmjs, will skip npmjs publish"
           else
             echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Version $VERSION is new, will publish"
+            echo "Version $VERSION is new on npmjs, will publish"
+          fi
+        continue-on-error: true
+
+      - name: Check if version exists on GitHub Packages
+        id: check-github
+        run: |
+          VERSION=${{ steps.package-version.outputs.version }}
+          npm config set @dytsou:registry https://npm.pkg.github.com
+          npm config set //npm.pkg.github.com/:_authToken ${{ secrets.GITHUB_TOKEN }}
+          if npm view @dytsou/calendar-build@$VERSION version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Version $VERSION already exists on GitHub Packages, will skip GitHub Packages publish"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Version $VERSION is new on GitHub Packages, will publish"
           fi
 
       - name: Verify package
-        if: steps.check-version.outputs.exists == 'false'
+        if: steps.check-npmjs.outputs.exists == 'false' || steps.check-github.outputs.exists == 'false'
         run: |
           npm pack --dry-run
 
-      - name: Publish to npm
-        if: steps.check-version.outputs.exists == 'false'
-        id: publish
-        run: npm publish --access public
+      # 1) Publish to npmjs
+      - name: Publish to npmjs
+        if: steps.check-npmjs.outputs.exists == 'false'
+        id: publish-npmjs
+        run: |
+          npm config set registry https://registry.npmjs.org
+          npm config set //registry.npmjs.org/:_authToken ${{ secrets.NPM_TOKEN }}
+          npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         continue-on-error: false
 
+      # 2) Publish to GitHub Packages
+      - name: Publish to GitHub Packages
+        if: steps.check-github.outputs.exists == 'false'
+        id: publish-github
+        run: |
+          npm config set registry https://npm.pkg.github.com
+          npm config set @dytsou:registry https://npm.pkg.github.com
+          npm config set //npm.pkg.github.com/:_authToken ${{ secrets.GITHUB_TOKEN }}
+          npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: false
+
       - name: Create GitHub Release
-        if: steps.check-version.outputs.exists == 'false' && steps.publish.outcome == 'success'
+        if: (steps.check-npmjs.outputs.exists == 'false' && steps.publish-npmjs.outcome == 'success') || (steps.check-github.outputs.exists == 'false' && steps.publish-github.outcome == 'success')
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ steps.package-version.outputs.version }}
           name: v${{ steps.package-version.outputs.version }}
           body: |
-            ## calendar-build@${{ steps.package-version.outputs.version }}
+            ## @dytsou/calendar-build@${{ steps.package-version.outputs.version }}
 
-            Published to npm: https://www.npmjs.com/package/calendar-build
+            Published to multiple registries:
+
+            - **npmjs.com**: https://www.npmjs.com/package/@dytsou/calendar-build
+            - **GitHub Packages**: https://github.com/dytsou/cal/packages
 
             ### Installation
+
+            **From npmjs (default):**
             ```bash
-            npm install -g calendar-build
+            npm install -g @dytsou/calendar-build
             # or
-            pnpm install -g calendar-build
+            pnpm install -g @dytsou/calendar-build
+            ```
+
+            **From GitHub Packages:**
+            
+            First, create or update your `.npmrc` file:
+            ```ini
+            @dytsou:registry=https://npm.pkg.github.com
+            //npm.pkg.github.com/:_authToken=YOUR_GITHUB_TOKEN
+            ```
+
+            Then install:
+            ```bash
+            npm install -g @dytsou/calendar-build
+            # or
+            pnpm install -g @dytsou/calendar-build
             ```
 
             ### Usage
@@ -90,9 +142,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish skipped
-        if: steps.check-version.outputs.exists == 'true'
+      - name: Publish summary
+        if: always()
         run: |
-          echo "Skipping publish - version already exists on npm"
-          echo "To publish a new version, update the version in package.json"
+          echo "## Publish Summary"
+          echo "### npmjs"
+          if [ "${{ steps.check-npmjs.outputs.exists }}" == "true" ]; then
+            echo "Skipped - version already exists"
+          elif [ "${{ steps.publish-npmjs.outcome }}" == "success" ]; then
+            echo "Published successfully"
+          elif [ "${{ steps.publish-npmjs.outcome }}" == "failure" ]; then
+            echo "Failed to publish"
+          else
+            echo "Skipped - not attempted"
+          fi
+          echo ""
+          echo "### GitHub Packages"
+          if [ "${{ steps.check-github.outputs.exists }}" == "true" ]; then
+            echo "Skipped - version already exists"
+          elif [ "${{ steps.publish-github.outcome }}" == "success" ]; then
+            echo "Published successfully"
+          elif [ "${{ steps.publish-github.outcome }}" == "failure" ]; then
+            echo "Failed to publish"
+          else
+            echo "⏭️  Skipped - not attempted"
+          fi
 
