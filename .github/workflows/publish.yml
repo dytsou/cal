@@ -63,7 +63,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ steps.package-version.outputs.version }}
-          name: Release v${{ steps.package-version.outputs.version }}
+          name: v${{ steps.package-version.outputs.version }}
           body: |
             ## calendar-build@${{ steps.package-version.outputs.version }}
 
