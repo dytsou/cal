@@ -1,0 +1,65 @@
+name: Publish to npm
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'package.json'
+      - 'build.js'
+      - 'index.html.template'
+  release:
+    types: [created]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Get package version
+        id: package-version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Current package version: $VERSION"
+
+      - name: Check if version exists on npm
+        id: check-version
+        run: |
+          VERSION=${{ steps.package-version.outputs.version }}
+          if npm view calendar-build@$VERSION version >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Version $VERSION already exists on npm, skipping publish"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Version $VERSION is new, will publish"
+          fi
+
+      - name: Verify package
+        if: steps.check-version.outputs.exists == 'false'
+        run: |
+          npm pack --dry-run
+
+      - name: Publish to npm
+        if: steps.check-version.outputs.exists == 'false'
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish skipped
+        if: steps.check-version.outputs.exists == 'true'
+        run: |
+          echo "Skipping publish - version already exists on npm"
+          echo "To publish a new version, update the version in package.json"
+
