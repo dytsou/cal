@@ -1,6 +1,6 @@
 {
   "name": "@dytsou/calendar-build",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Build script for calendar HTML from template and environment variables",
   "main": "build.js",
   "bin": {
