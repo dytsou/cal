@@ -63,6 +63,7 @@ jobs:
             echo "exists=false" >> $GITHUB_OUTPUT
             echo "Version $VERSION is new on GitHub Packages, will publish"
           fi
+        continue-on-error: true
 
       - name: Verify package
         if: steps.check-npmjs.outputs.exists == 'false' || steps.check-github.outputs.exists == 'false'
@@ -76,10 +77,18 @@ jobs:
         run: |
           npm config set registry https://registry.npmjs.org
           npm config set //registry.npmjs.org/:_authToken ${{ secrets.NPM_TOKEN }}
-          npm publish --access public
+          npm publish --access public || {
+            if npm view @dytsou/calendar-build@${{ steps.package-version.outputs.version }} version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+              echo "Version already exists, skipping publish"
+              exit 0
+            else
+              echo "Publish failed for unknown reason"
+              exit 1
+            fi
+          }
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        continue-on-error: false
+        continue-on-error: true
 
       # 2) Publish to GitHub Packages
       - name: Publish to GitHub Packages
@@ -89,24 +98,68 @@ jobs:
           npm config set registry https://npm.pkg.github.com
           npm config set @dytsou:registry https://npm.pkg.github.com
           npm config set //npm.pkg.github.com/:_authToken ${{ secrets.GITHUB_TOKEN }}
-          npm publish
+          npm publish || {
+            if npm view @dytsou/calendar-build@${{ steps.package-version.outputs.version }} version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+              echo "Version already exists, skipping publish"
+              exit 0
+            else
+              echo "Publish failed for unknown reason"
+              exit 1
+            fi
+          }
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: false
+        continue-on-error: true
+
+      - name: Check if release should be created
+        id: should-create-release
+        run: |
+          NPMJS_PUBLISHED=false
+          GITHUB_PUBLISHED=false
+          NPMJS_SKIPPED=false
+          GITHUB_SKIPPED=false
+          
+          # Check if npmjs was published in this run
+          if [ "${{ steps.check-npmjs.outputs.exists }}" == "false" ] && [ "${{ steps.publish-npmjs.outcome }}" == "success" ]; then
+            NPMJS_PUBLISHED=true
+          elif [ "${{ steps.check-npmjs.outputs.exists }}" == "true" ]; then
+            NPMJS_SKIPPED=true
+          fi
+          
+          # Check if GitHub Packages was published in this run
+          if [ "${{ steps.check-github.outputs.exists }}" == "false" ] && [ "${{ steps.publish-github.outcome }}" == "success" ]; then
+            GITHUB_PUBLISHED=true
+          elif [ "${{ steps.check-github.outputs.exists }}" == "true" ]; then
+            GITHUB_SKIPPED=true
+          fi
+          
+          # Create release if:
+          # 1. Any registry was published in this run, OR
+          # 2. GitHub Packages was published (even if npmjs was skipped because it already exists)
+          if [ "$NPMJS_PUBLISHED" == "true" ] || [ "$GITHUB_PUBLISHED" == "true" ]; then
+            echo "should_create=true" >> $GITHUB_OUTPUT
+            echo "Should create release: npmjs_published=$NPMJS_PUBLISHED, github_published=$GITHUB_PUBLISHED, npmjs_skipped=$NPMJS_SKIPPED, github_skipped=$GITHUB_SKIPPED"
+          else
+            echo "should_create=false" >> $GITHUB_OUTPUT
+            echo "Skipping release creation - no new publishes (both may already exist)"
+          fi
 
       - name: Create GitHub Release
-        if: (steps.check-npmjs.outputs.exists == 'false' && steps.publish-npmjs.outcome == 'success') || (steps.check-github.outputs.exists == 'false' && steps.publish-github.outcome == 'success')
+        if: steps.should-create-release.outputs.should_create == 'true'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ steps.package-version.outputs.version }}
           name: v${{ steps.package-version.outputs.version }}
+          prerelease: ${{ contains(steps.package-version.outputs.version, 'beta') || contains(steps.package-version.outputs.version, 'alpha') || contains(steps.package-version.outputs.version, 'rc') }}
           body: |
             ## @dytsou/calendar-build@${{ steps.package-version.outputs.version }}
 
-            Published to multiple registries:
+            **Published to multiple registries:**
 
             - **npmjs.com**: https://www.npmjs.com/package/@dytsou/calendar-build
             - **GitHub Packages**: https://github.com/dytsou/cal/packages
+
+            *Note: If a registry already had this version, it was skipped. Only missing registries were published.*
 
             ### Installation
 
@@ -138,7 +191,6 @@ jobs:
             ```
           generate_release_notes: true
           draft: false
-          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -165,6 +217,6 @@ jobs:
           elif [ "${{ steps.publish-github.outcome }}" == "failure" ]; then
             echo "Failed to publish"
           else
-            echo "⏭️  Skipped - not attempted"
+            echo "Skipped - not attempted"
           fi
 
