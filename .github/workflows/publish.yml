@@ -15,6 +15,9 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -57,13 +60,14 @@ jobs:
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        continue-on-error: false
 
       - name: Create GitHub Release
         if: steps.check-version.outputs.exists == 'false' && steps.publish.outcome == 'success'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ steps.package-version.outputs.version }}
-          name: v${{ steps.package-version.outputs.version }}
+          name: Release v${{ steps.package-version.outputs.version }}
           body: |
             ## calendar-build@${{ steps.package-version.outputs.version }}
 
@@ -80,6 +84,7 @@ jobs:
             ```bash
             calendar-build
             ```
+          generate_release_notes: true
           draft: false
           prerelease: false
         env:
