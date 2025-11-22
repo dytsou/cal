@@ -1,0 +1,17 @@
+# Environment variables
+.env
+
+# Built files (optional - uncomment if you want to ignore built index.html)
+index.html
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
