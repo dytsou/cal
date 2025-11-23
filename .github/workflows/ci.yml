@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [18, 20]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js v${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+    
+    - name: Create test .env file
+      run: |
+        echo "CALENDAR_SOURCES=test-calendar-1,test-calendar-2,test-calendar-3" > .env
+    
+    - name: Run build
+      run: npm run build
+    
+    - name: Verify build output
+      run: |
+        if [ ! -f index.html ]; then
+          echo "Error: index.html was not generated"
+          exit 1
+        fi
+        if ! grep -q "test-calendar-1" index.html; then
+          echo "Error: Calendar sources were not injected correctly"
+          exit 1
+        fi
+        echo "Build verification passed"
+
