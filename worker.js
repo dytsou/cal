@@ -2,14 +2,20 @@
  * Cloudflare Worker to decrypt fernet:// URLs and proxy to open-web-calendar
  * 
  * This worker:
- * 1. Receives requests with fernet:// URLs in query parameters
- * 2. Decrypts the fernet:// URLs using Fernet
+ * 1. Reads CALENDAR_URL from Cloudflare Worker secrets (comma-separated)
+ * 2. Decrypts fernet:// URLs using Fernet encryption (ENCRYPTION_METHOD is hardcoded to 'fernet')
  * 3. Forwards the request to open-web-calendar with decrypted URLs
  * 4. Returns the calendar HTML
  * 
+ * Configuration:
+ * - ENCRYPTION_METHOD: Hardcoded to 'fernet' (not configurable)
+ * - ENCRYPTION_KEY: Required Cloudflare Worker secret (for decrypting fernet:// URLs)
+ * - CALENDAR_URL: Required Cloudflare Worker secret (comma-separated, can be plain or fernet:// encrypted)
+ * 
  * Usage:
- * 1. Set ENCRYPTION_KEY secret: wrangler secret put ENCRYPTION_KEY
- * 2. Deploy: wrangler deploy
+ * 1. Set CALENDAR_URL secret: wrangler secret put CALENDAR_URL
+ * 2. Set ENCRYPTION_KEY secret: wrangler secret put ENCRYPTION_KEY
+ * 3. Deploy: wrangler deploy
  */
 
 // Import Fernet library - we'll need to bundle this for Workers
@@ -193,20 +199,39 @@ export default {
   async fetch(request, env) {
     try {
       const url = new URL(request.url);
-      const encryptionKey = env.ENCRYPTION_KEY;
       
-      if (!encryptionKey) {
-        return new Response('ENCRYPTION_KEY not configured', { 
+      // ENCRYPTION_METHOD is hardcoded to 'fernet'
+      const ENCRYPTION_METHOD = 'fernet';
+      
+      const encryptionKey = env.ENCRYPTION_KEY;
+      const calendarUrlSecret = env.CALENDAR_URL; // Read from Cloudflare Worker secret
+      
+      if (!calendarUrlSecret) {
+        return new Response('CALENDAR_URL not configured in Cloudflare Worker secrets', { 
           status: 500,
           headers: { 'Content-Type': 'text/plain' }
         });
       }
       
-      // Get all url parameters (may be multiple)
-      const fernetUrls = url.searchParams.getAll('url');
+      // Parse calendar URLs from secret (comma-separated, can be plain or fernet://)
+      const calendarUrlsFromSecret = calendarUrlSecret
+        .split(',')
+        .map(s => s.trim())
+        .filter(s => s);
+      
+      // Use calendar URLs from secret (they may be fernet:// encrypted or plain)
+      const calendarUrls = calendarUrlsFromSecret;
       
       // Check if any of the URLs are fernet:// encrypted
-      const hasFernetUrls = fernetUrls.some(url => url.startsWith('fernet://'));
+      const hasFernetUrls = calendarUrls.some(url => url.startsWith('fernet://'));
+      
+      // If we have fernet:// URLs, we need ENCRYPTION_KEY
+      if (hasFernetUrls && !encryptionKey) {
+        return new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', { 
+          status: 500,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      }
       
       // Get the pathname to determine request type
       const pathname = url.pathname;
@@ -226,44 +251,8 @@ export default {
                             pathname.endsWith('.events.json') ||
                             pathname.endsWith('.json');
       
-      // For API endpoints like /srcdoc, we need to get the calendar URLs
-      // Priority: 1) Query params, 2) Cookie, 3) Referer header
+      // For API endpoints like /srcdoc, always use calendar URLs from secret
       if (isApiEndpoint) {
-        let urlsToUse = fernetUrls;
-        
-        // If no URLs in current request, try to get them from cookie
-        if (urlsToUse.length === 0) {
-          const cookieHeader = request.headers.get('Cookie');
-          if (cookieHeader) {
-            const cookies = cookieHeader.split(';').reduce((acc, cookie) => {
-              const [key, value] = cookie.trim().split('=');
-              acc[key] = value;
-              return acc;
-            }, {});
-            
-            if (cookies['owc_urls']) {
-              try {
-                urlsToUse = decodeURIComponent(cookies['owc_urls']).split('|');
-              } catch (e) {
-                // Ignore cookie parse errors
-              }
-            }
-          }
-        }
-        
-        // If still no URLs, try Referer
-        if (urlsToUse.length === 0) {
-          const refererHeader = request.headers.get('Referer');
-          if (refererHeader) {
-            try {
-              const refererUrl = new URL(refererHeader);
-              urlsToUse = refererUrl.searchParams.getAll('url');
-            } catch (e) {
-              // Ignore referer parse errors
-            }
-          }
-        }
-        
         // Build the target URL
         const targetUrl = new URL(`https://open-web-calendar.hosted.quelltext.eu${pathname}`);
         
@@ -274,29 +263,35 @@ export default {
           }
         }
         
-        // If we have URLs (fernet:// or plain), decrypt and add them
-        if (urlsToUse.length > 0) {
-          const decryptedUrls = [];
-          for (const urlParam of urlsToUse) {
-            if (urlParam.startsWith('fernet://')) {
-              try {
-                const decrypted = await decryptFernetUrl(urlParam, encryptionKey);
-                decryptedUrls.push(decrypted);
-              } catch (error) {
-                return new Response(`Failed to decrypt calendar URL: ${error.message}`, { 
-                  status: 500,
-                  headers: { 'Content-Type': 'text/plain' }
-                });
-              }
-            } else {
-              decryptedUrls.push(urlParam);
+        // Decrypt and add calendar URLs from secret
+        // ENCRYPTION_METHOD is hardcoded to 'fernet'
+        const decryptedUrls = [];
+        for (const urlParam of calendarUrls) {
+          if (urlParam.startsWith('fernet://')) {
+            if (!encryptionKey) {
+              return new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', { 
+                status: 500,
+                headers: { 'Content-Type': 'text/plain' }
+              });
             }
+            try {
+              const decrypted = await decryptFernetUrl(urlParam, encryptionKey);
+              decryptedUrls.push(decrypted);
+            } catch (error) {
+              return new Response(`Failed to decrypt calendar URL: ${error.message}`, { 
+                status: 500,
+                headers: { 'Content-Type': 'text/plain' }
+              });
+            }
+          } else {
+            // Plain URL, use as-is
+            decryptedUrls.push(urlParam);
           }
-          
-          // Add decrypted URLs
-          for (const decryptedUrl of decryptedUrls) {
-            targetUrl.searchParams.append('url', decryptedUrl);
-          }
+        }
+        
+        // Add decrypted URLs
+        for (const decryptedUrl of decryptedUrls) {
+          targetUrl.searchParams.append('url', decryptedUrl);
         }
         
         // Forward all headers from the original request
@@ -315,94 +310,83 @@ export default {
         return await sanitizeResponse(response);
       }
       
-      // Only decrypt fernet:// URLs if:
-      // 1. There are fernet:// URLs in the query params, AND
-      // 2. This is the main calendar page request
-      // All other requests (static resources, etc.) should be proxied directly
-      if (!hasFernetUrls || !isMainCalendarPage) {
-        // Proxy this request directly to open-web-calendar
-        // Handle root path and calendar.html specially
-        let targetPath = pathname;
-        if (pathname === '/' || pathname === '') {
-          targetPath = '/calendar.html';
+      // Handle main calendar page requests - always add calendar URLs from secret
+      if (isMainCalendarPage) {
+        // Decrypt calendar URLs from secret
+        // ENCRYPTION_METHOD is hardcoded to 'fernet'
+        const decryptedUrls = [];
+        for (const urlParam of calendarUrls) {
+          if (urlParam.startsWith('fernet://')) {
+            if (!encryptionKey) {
+              return new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', { 
+                status: 500,
+                headers: { 'Content-Type': 'text/plain' }
+              });
+            }
+            try {
+              const decrypted = await decryptFernetUrl(urlParam, encryptionKey);
+              decryptedUrls.push(decrypted);
+            } catch (error) {
+              return new Response(`Failed to decrypt calendar URL: ${error.message}`, { 
+                status: 500,
+                headers: { 'Content-Type': 'text/plain' }
+              });
+            }
+          } else {
+            // Plain URL, use as-is
+            decryptedUrls.push(urlParam);
+          }
         }
         
-        const targetUrl = new URL(`https://open-web-calendar.hosted.quelltext.eu${targetPath}${url.search}`);
+        // Build the open-web-calendar URL with decrypted URLs
+        const calendarUrl = new URL('https://open-web-calendar.hosted.quelltext.eu/calendar.html');
         
-        // Forward all headers from the original request
-        const requestHeaders = new Headers();
-        request.headers.forEach((value, key) => {
-          // Skip certain headers that shouldn't be forwarded
-          if (key.toLowerCase() !== 'host' && key.toLowerCase() !== 'cf-ray' && key.toLowerCase() !== 'cf-connecting-ip') {
-            requestHeaders.set(key, value);
+        // Copy all query parameters except 'url' (calendar URLs come from secret)
+        for (const [key, value] of url.searchParams.entries()) {
+          if (key !== 'url') {
+            calendarUrl.searchParams.append(key, value);
           }
-        });
+        }
         
-        const response = await fetch(targetUrl.toString(), {
-          headers: requestHeaders,
+        // Add decrypted URLs from secret
+        for (const decryptedUrl of decryptedUrls) {
+          calendarUrl.searchParams.append('url', decryptedUrl);
+        }
+        
+        // Fetch from open-web-calendar
+        const response = await fetch(calendarUrl.toString(), {
+          headers: {
+            'User-Agent': request.headers.get('User-Agent') || 'Cloudflare-Worker',
+          },
         });
         
         // Sanitize response to hide calendar URLs in error messages
         return await sanitizeResponse(response);
       }
       
-      // Decrypt fernet:// URLs
-      const decryptedUrls = [];
-      for (const fernetUrl of fernetUrls) {
-        if (fernetUrl.startsWith('fernet://')) {
-          try {
-            // Decrypt the URL
-            const decrypted = await decryptFernetUrl(fernetUrl, encryptionKey);
-            decryptedUrls.push(decrypted);
-          } catch (error) {
-            return new Response(`Failed to decrypt calendar URL: ${error.message}`, { 
-              status: 500,
-              headers: { 'Content-Type': 'text/plain' }
-            });
-          }
-        } else {
-          // Already a plain URL, use as-is
-          decryptedUrls.push(fernetUrl);
+      // For all other requests (static resources, etc.), proxy directly
+      let targetPath = pathname;
+      if (pathname === '/' || pathname === '') {
+        targetPath = '/calendar.html';
+      }
+      
+      const targetUrl = new URL(`https://open-web-calendar.hosted.quelltext.eu${targetPath}${url.search}`);
+      
+      // Forward all headers from the original request
+      const requestHeaders = new Headers();
+      request.headers.forEach((value, key) => {
+        // Skip certain headers that shouldn't be forwarded
+        if (key.toLowerCase() !== 'host' && key.toLowerCase() !== 'cf-ray' && key.toLowerCase() !== 'cf-connecting-ip') {
+          requestHeaders.set(key, value);
         }
-      }
-      
-      // Build the open-web-calendar URL with decrypted URLs
-      const calendarUrl = new URL('https://open-web-calendar.hosted.quelltext.eu/calendar.html');
-      
-      // Copy all query parameters except 'url'
-      for (const [key, value] of url.searchParams.entries()) {
-        if (key !== 'url') {
-          calendarUrl.searchParams.append(key, value);
-        }
-      }
-      
-      // Add decrypted URLs
-      for (const decryptedUrl of decryptedUrls) {
-        calendarUrl.searchParams.append('url', decryptedUrl);
-      }
-      
-      // Fetch from open-web-calendar
-      const response = await fetch(calendarUrl.toString(), {
-        headers: {
-          'User-Agent': request.headers.get('User-Agent') || 'Cloudflare-Worker',
-        },
       });
       
-      // Clone response headers and modify them
-      const responseHeaders = new Headers(response.headers);
-      responseHeaders.set('Access-Control-Allow-Origin', '*');
-      
-      // Set cookie with fernet:// URLs so subsequent requests (like /srcdoc) can access them
-      // Use pipe separator since URLs may contain commas
-      if (fernetUrls.length > 0) {
-        const cookieValue = encodeURIComponent(fernetUrls.join('|'));
-        responseHeaders.set('Set-Cookie', `owc_urls=${cookieValue}; Path=/; SameSite=Lax; Max-Age=3600`);
-      }
+      const response = await fetch(targetUrl.toString(), {
+        headers: requestHeaders,
+      });
       
       // Sanitize response to hide calendar URLs in error messages
-      // Clone response first to avoid modifying the original
-      const clonedResponse = response.clone();
-      return await sanitizeResponse(clonedResponse);
+      return await sanitizeResponse(response);
     } catch (error) {
       return new Response(`Error: ${error.message}`, { 
         status: 500,

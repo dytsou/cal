@@ -14,42 +14,50 @@ if (!fs.existsSync(templatePath)) {
 
 let html = fs.readFileSync(templatePath, 'utf-8');
 
-// Read .env file if template has placeholders
+// Always check for placeholders that need replacement
 const hasPlaceholders = html.includes('{{CALENDAR_SOURCES}}') || html.includes('{{CALENDAR_URLS}}');
-if (hasPlaceholders) {
+const needsWorkerUrl = html.includes('{{WORKER_URL}}');
+let workerUrl = '';
+
+// Always read .env for WORKER_URL if needed
+if (needsWorkerUrl || hasPlaceholders) {
   const envPath = path.join(__dirname, '..', '.env');
-  if (!fs.existsSync(envPath)) {
+  if (hasPlaceholders && !fs.existsSync(envPath)) {
     console.error('Error: .env file not found (required for placeholders)');
     process.exit(1);
   }
+  
+  if (fs.existsSync(envPath)) {
+    const envContent = fs.readFileSync(envPath, 'utf-8');
+    const envLines = envContent.split('\n');
 
-  const envContent = fs.readFileSync(envPath, 'utf-8');
-  const envLines = envContent.split('\n');
+    // Parse environment variables
+    let calendarSources = [];
+    let calendarUrls = [];
 
-  // Parse environment variables
-  let calendarSources = [];
-  let calendarUrls = [];
-  let workerUrl = '';
-
-  for (const line of envLines) {
-    if (line.startsWith('CALENDAR_SOURCES=')) {
-      const value = line.substring('CALENDAR_SOURCES='.length).trim();
-      calendarSources = value
-        .split(',')
-        .map(s => s.trim())
-        .filter(s => s);
-    } else if (line.startsWith('CALENDAR_URL=')) {
-      const value = line.substring('CALENDAR_URL='.length).trim();
-      // Support both single URL and comma-separated multiple URLs
-      const urls = value
-        .split(',')
-        .map(s => s.trim())
-        .filter(s => s);
-      calendarUrls.push(...urls);
-    } else if (line.startsWith('WORKER_URL=')) {
-      workerUrl = line.substring('WORKER_URL='.length).trim();
+    for (const line of envLines) {
+      if (line.startsWith('CALENDAR_SOURCES=')) {
+        const value = line.substring('CALENDAR_SOURCES='.length).trim();
+        calendarSources = value
+          .split(',')
+          .map(s => s.trim())
+          .filter(s => s);
+      } else if (line.startsWith('CALENDAR_URL=')) {
+        const value = line.substring('CALENDAR_URL='.length).trim();
+        // Support both single URL and comma-separated multiple URLs
+        const urls = value
+          .split(',')
+          .map(s => s.trim())
+          .filter(s => s);
+        calendarUrls.push(...urls);
+      } else if (line.startsWith('WORKER_URL=')) {
+        workerUrl = line.substring('WORKER_URL='.length).trim();
+      }
     }
   }
+}
+
+if (hasPlaceholders) {
 
   // Replace CALENDAR_SOURCES placeholder
   if (html.includes('{{CALENDAR_SOURCES}}')) {
@@ -137,16 +145,6 @@ if (hasPlaceholders) {
 
     html = html.replace('{{CALENDAR_URLS}}', calendarUrlsArrayCode);
     
-    // Replace worker URL placeholder
-    // With Cloudflare Worker, decryption happens server-side
-    // No need for client-side Fernet bundle
-    // Use WORKER_URL from .env, or fallback to process.env, or default to open-web-calendar
-    const finalWorkerUrl = workerUrl || process.env.WORKER_URL || 'https://open-web-calendar.hosted.quelltext.eu/calendar.html';
-    html = html.replace('{{WORKER_URL}}', finalWorkerUrl);
-    if (finalWorkerUrl !== 'https://open-web-calendar.hosted.quelltext.eu/calendar.html') {
-      console.log(`✓ Using Cloudflare Worker: ${finalWorkerUrl}`);
-    }
-    
     // Remove encryption key placeholder (not needed with Worker)
     html = html.replace('{{ENCRYPTION_KEY}}', '');
     
@@ -157,8 +155,17 @@ if (hasPlaceholders) {
       console.log('✓ Removed fernet-bundle.js (using Cloudflare Worker instead)');
     }
   }
-} else {
-  console.log('✓ Built index.html from template (no placeholders to replace)');
+}
+
+// Always replace WORKER_URL placeholder if it exists (regardless of other placeholders)
+if (html.includes('{{WORKER_URL}}')) {
+  const finalWorkerUrl = workerUrl || process.env.WORKER_URL || 'https://open-web-calendar.hosted.quelltext.eu';
+  html = html.replace('{{WORKER_URL}}', finalWorkerUrl);
+  if (finalWorkerUrl !== 'https://open-web-calendar.hosted.quelltext.eu') {
+    console.log(`✓ Using Cloudflare Worker: ${finalWorkerUrl}`);
+  } else {
+    console.log('✓ Replaced {{WORKER_URL}} with default open-web-calendar URL');
+  }
 }
 
 // Get current year for placeholders

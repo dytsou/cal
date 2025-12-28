@@ -33,8 +33,8 @@ jobs:
 
       - name: Create test .env file
         run: |
-          echo "CALENDAR_URL=https://calendar.google.com/calendar/ical/test1%40example.com/public/basic.ics,https://calendar.google.com/calendar/ical/test2%40example.com/public/basic.ics" > .env
-          # Don't set ENCRYPTION_METHOD so URLs are not encrypted for testing
+          echo "WORKER_URL=" > .env
+          echo "✓ Note: CALENDAR_URL is now managed via Cloudflare Worker secrets"
 
       - name: Run build
         run: pnpm run build
@@ -45,20 +45,14 @@ jobs:
             echo "Error: index.html was not generated"
             exit 1
           fi
-          # Check if calendarUrls configuration exists
-          if ! grep -q "calendarUrls:" index.html; then
-            echo "Error: calendarUrls configuration not found"
+          # Verify that calendar URLs are NOT in the HTML (they're in Cloudflare Worker secrets)
+          if grep -q "calendarUrls:" index.html; then
+            echo "Error: calendarUrls should not be in HTML (they're in Cloudflare Worker secrets)"
             exit 1
           fi
-          # Check if calendar URLs are present (plain URLs since encryption is not enabled)
-          if grep -q "test1%40example.com" index.html; then
-            echo "✓ Calendar URLs were injected correctly (plain format)"
-          elif grep -q "fernet://" index.html; then
-            echo "✓ Calendar URLs were injected correctly (encrypted format)"
-          else
-            echo "Error: Calendar URLs were not injected correctly"
-            echo "Checking index.html content..."
-            grep -o "calendarUrls:.*" index.html | head -1 || echo "No calendarUrls found"
+          # Verify WORKER_URL placeholder was replaced
+          if grep -q "{{WORKER_URL}}" index.html; then
+            echo "Error: {{WORKER_URL}} placeholder was not replaced"
             exit 1
           fi
-          echo "Build verification passed"
+          echo "✓ Build verification passed - Calendar URLs are managed via Cloudflare Worker secrets"
