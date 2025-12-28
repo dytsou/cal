@@ -150,6 +150,82 @@ async function decryptFernetUrl(fernetUrl, secretKey) {
 }
 
 /**
+ * Inject console filtering script into HTML to block calendar info logs
+ */
+function injectConsoleFilter(html) {
+  const consoleFilterScript = `
+<script>
+(function() {
+  const originalLog = console.log;
+  const originalInfo = console.info;
+  
+  function containsCalendarInfo(args) {
+    const message = args.map(arg => {
+      if (typeof arg === 'string') {
+        return arg;
+      } else if (arg && typeof arg === 'object') {
+        try {
+          return JSON.stringify(arg);
+        } catch (e) {
+          return String(arg);
+        }
+      }
+      return String(arg);
+    }).join(' ');
+    
+    if (message.includes('Calendar Info:') || 
+        message.includes('calendars:') ||
+        message.includes('calendar_index:') ||
+        message.includes('url_index:')) {
+      return true;
+    }
+    
+    for (const arg of args) {
+      if (arg && typeof arg === 'object') {
+        const keys = Object.keys(arg);
+        if (keys.includes('calendars') || 
+            keys.includes('calendar_index') ||
+            keys.includes('url_index') ||
+            (arg.calendars && Array.isArray(arg.calendars))) {
+          return true;
+        }
+      }
+    }
+    
+    return false;
+  }
+  
+  console.log = function(...args) {
+    if (containsCalendarInfo(args)) {
+      return; // Don't log calendar info
+    }
+    originalLog.apply(console, args);
+  };
+  
+  console.info = function(...args) {
+    if (containsCalendarInfo(args)) {
+      return; // Don't log calendar info
+    }
+    originalInfo.apply(console, args);
+  };
+})();
+</script>`;
+  
+  // Inject the script right after <head> or at the beginning of <body>
+  if (html.includes('</head>')) {
+    return html.replace('</head>', consoleFilterScript + '</head>');
+  } else if (html.includes('<body')) {
+    const bodyMatch = html.match(/<body[^>]*>/);
+    if (bodyMatch) {
+      return html.replace(bodyMatch[0], bodyMatch[0] + consoleFilterScript);
+    }
+  }
+  
+  // Fallback: inject at the very beginning
+  return consoleFilterScript + html;
+}
+
+/**
  * Sanitize response body to hide calendar URLs in error messages
  * Only sanitizes HTML and JSON responses to avoid breaking JavaScript code
  */
@@ -172,6 +248,13 @@ async function sanitizeResponse(response) {
   
   const body = await response.text();
   
+  let sanitizedBody = body;
+  
+  // For HTML responses, inject console filtering
+  if (contentType.includes('text/html')) {
+    sanitizedBody = injectConsoleFilter(sanitizedBody);
+  }
+  
   // Patterns to detect and sanitize calendar URLs
   // Only match complete URLs, not code fragments
   const urlPatterns = [
@@ -181,7 +264,6 @@ async function sanitizeResponse(response) {
     /%40[a-zA-Z0-9._-]+\.[a-zA-Z]{2,}[^\s"']*/gi,
   ];
   
-  let sanitizedBody = body;
   urlPatterns.forEach(pattern => {
     sanitizedBody = sanitizedBody.replace(pattern, '[Calendar URL hidden]');
   });

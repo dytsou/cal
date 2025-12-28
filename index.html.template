@@ -117,25 +117,63 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
                 }
             };
             
-            console.log = function(...args) {
-                const message = args.join(' ');
-                // Filter out calendar-related logs and HTTPError messages
-                if (message.includes('Calendar Info:') || 
-                    message.includes('HTTPError') ||
-                    message.includes('Error in ConvertToCalendars') ||
-                    urlPatterns.some(pattern => pattern.test(message))) {
-                    // Don't log or sanitize and log
-                    if (urlPatterns.some(pattern => pattern.test(message))) {
-                        const sanitized = sanitizeArgs(args);
-                        originalLog.apply(console, sanitized);
+            // Helper function to check if args contain calendar info
+            function containsCalendarInfo(args) {
+                // Check string messages
+                const message = args.map(arg => {
+                    if (typeof arg === 'string') {
+                        return arg;
+                    } else if (arg && typeof arg === 'object') {
+                        try {
+                            return JSON.stringify(arg);
+                        } catch (e) {
+                            return String(arg);
+                        }
                     }
+                    return String(arg);
+                }).join(' ');
+                
+                // Check for calendar info patterns
+                if (message.includes('Calendar Info:') || 
+                    message.includes('calendars:') ||
+                    message.includes('calendar_index:') ||
+                    message.includes('url_index:') ||
+                    message.includes('HTTPError') ||
+                    message.includes('Error in ConvertToCalendars')) {
+                    return true;
+                }
+                
+                // Check if any arg is an object with calendar-related properties
+                for (const arg of args) {
+                    if (arg && typeof arg === 'object') {
+                        const keys = Object.keys(arg);
+                        if (keys.includes('calendars') || 
+                            keys.includes('calendar_index') ||
+                            keys.includes('url_index') ||
+                            (arg.calendars && Array.isArray(arg.calendars))) {
+                            return true;
+                        }
+                    }
+                }
+                
+                return false;
+            }
+            
+            console.log = function(...args) {
+                // Filter out calendar-related logs completely
+                if (containsCalendarInfo(args) || 
+                    urlPatterns.some(pattern => {
+                        const message = args.map(a => String(a)).join(' ');
+                        return pattern.test(message);
+                    })) {
+                    // Don't log calendar info at all
                     return;
                 }
                 originalLog.apply(console, args);
             };
             
             console.warn = function(...args) {
-                const message = args.join(' ');
+                const message = args.map(a => String(a)).join(' ');
                 if (urlPatterns.some(pattern => pattern.test(message))) {
                     const sanitized = sanitizeArgs(args);
                     originalWarn.apply(console, sanitized);
@@ -145,13 +183,13 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
             };
             
             console.info = function(...args) {
-                const message = args.join(' ');
-                if (message.includes('Calendar Info:') || 
-                    urlPatterns.some(pattern => pattern.test(message))) {
-                    if (urlPatterns.some(pattern => pattern.test(message))) {
-                        const sanitized = sanitizeArgs(args);
-                        originalInfo.apply(console, sanitized);
-                    }
+                // Filter out calendar-related info completely
+                if (containsCalendarInfo(args) || 
+                    urlPatterns.some(pattern => {
+                        const message = args.map(a => String(a)).join(' ');
+                        return pattern.test(message);
+                    })) {
+                    // Don't log calendar info at all
                     return;
                 }
                 originalInfo.apply(console, args);
