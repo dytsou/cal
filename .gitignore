@@ -1,11 +1,22 @@
 # Environment variables
 .env
 
+# Cloudflare Worker configuration (may contain personal domains)
+wrangler.toml
+
 # Built files (optional - uncomment if you want to ignore built index.html)
 index.html
 
 # Dependencies
 node_modules/
+
+# Cloudflare Workers
+.wrangler/
+dist/
+
+# Build artifacts
+fernet-bundle.js
+*.log
 
 # OS files
 .DS_Store

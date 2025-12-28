@@ -159,6 +159,54 @@ The build script:
 3. Updates `{{YEAR}}` placeholder with current year in LICENSE and HTML
 4. Generates `index.html` ready for deployment
 
+## Cloudflare Worker Setup
+
+This project uses a Cloudflare Worker to decrypt `fernet://` URLs server-side. The worker keeps calendar URLs encrypted in the iframe src while decrypting them server-side.
+
+### Setup Instructions
+
+1. **Copy wrangler.toml.example to wrangler.toml:**
+   ```bash
+   cp wrangler.toml.example wrangler.toml
+   ```
+   Then edit `wrangler.toml` and customize it for your environment (e.g., add custom domain routes).
+
+2. **Install Wrangler CLI:**
+   ```bash
+   npm install -g wrangler
+   # or
+   pnpm add -g wrangler
+   ```
+
+3. **Login to Cloudflare:**
+   ```bash
+   wrangler login
+   ```
+
+4. **Set Encryption Key Secret:**
+   ```bash
+   wrangler secret put ENCRYPTION_KEY
+   ```
+   When prompted, enter your Fernet encryption key (the same one from your `.env` file).
+
+5. **Deploy the Worker:**
+   ```bash
+   wrangler deploy
+   ```
+
+6. **Update your .env file:**
+   After deployment, update the `WORKER_URL` in your `.env` file with your worker URL:
+   ```
+   WORKER_URL=https://your-worker.your-subdomain.workers.dev
+   # or if using custom domain:
+   WORKER_URL=https://your-domain.com
+   ```
+
+7. **Rebuild your project:**
+   ```bash
+   pnpm run build
+   ```
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

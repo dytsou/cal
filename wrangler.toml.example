@@ -1,0 +1,34 @@
+name = "calendar-proxy"
+main = "worker.js"
+compatibility_date = "2025-12-28"
+
+# Environment variables (secrets should be set via wrangler secret put)
+# ENCRYPTION_KEY should be set as a secret: wrangler secret put ENCRYPTION_KEY
+#
+# Custom domain routes can be configured via:
+# 1. Cloudflare Dashboard: Workers & Pages > Your Worker > Settings > Triggers > Routes
+# 2. Wrangler CLI: wrangler routes add <pattern> --env production
+# 3. Or add routes here for your environment:
+#    routes = [
+#      { pattern = "your-domain.com", custom_domain = true }
+#    ]
+
+[env.production]
+name = "calendar-proxy"
+# Add your custom domain routes here if needed
+# routes = [
+#   { pattern = "your-domain.com", custom_domain = true }
+# ]
+
+[env.development]
+name = "calendar-proxy-dev"
+
+[observability]
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = false
+[observability.traces]
+enabled = false
+head_sampling_rate = 1
+
