@@ -17,6 +17,13 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
     <link rel="icon" type="image/png" href="asset/favicon.png">
 
     <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+
         body {
             transition: opacity ease-in 0.2s;
         }
@@ -31,76 +38,113 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
         iframe {
             border: solid 1px #777;
             width: 100%;
-            height: 95vh;
+            height: calc(100vh - 25px);
         }
     </style>
 </head>
 
 <body unresolved>
 
-    <iframe id="calendarFrame" frameborder="0" scrolling="no"></iframe>
+    <iframe id="open-web-calendar" 
+        style="background:url('https://raw.githubusercontent.com/niccokunzmann/open-web-calendar/master/static/img/loaders/circular-loader.gif') center center no-repeat;"
+        sandbox="allow-scripts allow-same-origin allow-downloads"
+        allowTransparency="true" scrolling="no" 
+        frameborder="0" width="100%"></iframe>
+
+    <p style="position: absolute; bottom: 2px; left: 0; right: 0; text-align: center; font-size: 9px; color: #ffffff; background-color: #000000; margin: 0; padding: 4px; pointer-events: none;">Copyright (c) 2025 dytsou</p>
 
     <script>
-        const calendarBaseURL = "https://calendar.google.com/calendar/embed?";
-        const searchParams = new URLSearchParams(window.location.search);
-        const calendarParams = new URLSearchParams({
-            height: 600,
-            wkst: 1,
-            ctz: "Asia/Taipei",
-            showPrint: 0,
-            showTitle: 0,
-            showDate: 0,
-            showNav: 0,
-            showCalendars: 0,
-            showTabs: 0,
-            mode: "WEEK"
-        });
-
-        const calendars = {{CALENDAR_SOURCES}};
-
-        const defaultColor = "%23A1B3FF";
-
-        const parseDatesRange = (value) => {
-            if (!value) return null;
-            const match = /^(\d{8})\/(\d{8})$/.exec(value);
-            if (!match) return null;
-            const [, start, end] = match;
-
-            // Basic validation to ensure chronological order.
-            if (start > end) return null;
-
-            return `${start}/${end}`;
-        };
-
-        const datesFromQuery = parseDatesRange(searchParams.get("dates"));
-        if (datesFromQuery) {
-            calendarParams.set("dates", datesFromQuery);
-        }
-
-        const defaultMode = "WEEK";
-        const allowedModes = new Set(["MONTH", "WEEK", "AGENDA"]);
-        const requestedMode = searchParams.get("mode");
+        // Get mode from URL parameter (e.g., ?mode=month, ?mode=week, ?mode=day)
+        const urlParams = new URLSearchParams(window.location.search);
+        const requestedMode = urlParams.get('mode');
+        const requestedDate = urlParams.get('date');
+        
+        // Valid modes and their mapping to open-web-calendar tab values
+        const validModes = ['month', 'week', 'day'];
+        const defaultMode = 'week';
+        
+        // Determine the tab to use
+        let selectedTab = defaultMode;
         if (requestedMode) {
-            const normalizedMode = requestedMode.toUpperCase();
-            if (allowedModes.has(normalizedMode)) {
-                calendarParams.set("mode", normalizedMode);
-            } else {
-                calendarParams.set("mode", defaultMode);
+            const normalizedMode = requestedMode.toLowerCase();
+            if (validModes.includes(normalizedMode)) {
+                selectedTab = normalizedMode;
             }
         }
+        
+        // Parse and validate date parameter (YYYYMMDD format)
+        let selectedDate = null;
+        if (requestedDate) {
+            // Validate YYYYMMDD format
+            const dateMatch = /^(\d{4})(\d{2})(\d{2})$/.exec(requestedDate);
+            if (dateMatch) {
+                const [, year, month, day] = dateMatch;
+                // Validate the date is actually valid
+                const dateObj = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+                if (dateObj.getFullYear() == year && 
+                    dateObj.getMonth() == parseInt(month) - 1 && 
+                    dateObj.getDate() == day) {
+                    // Convert YYYYMMDD to YYYY-MM-DD format for open-web-calendar
+                    selectedDate = `${year}-${month}-${day}`;
+                }
+            }
+        }
+        
+        // Calendar configuration
+        const calendarConfig = {
+            baseUrl: 'https://open-web-calendar.hosted.quelltext.eu/calendar.html',
+            params: {
+                controls: '',
+                menu: 'false',
+                css: '.dhx_scale_holder_now, .dhx_now .dhx_month_head, .dhx_now .dhx_month_body { background-color: #000000;}.dhx_month_body, .dhx_month_head, .dhx_cal_container { background-color: #000000; }.dhx_cal_navline, .dhx_cal_navline div, button[aria-label*="menu"], button[aria-label*="Menu"], .menu-button, [class*="menu"], [class*="hamburger"] { display: none !important; }',
+                event_url_geo: 'https://www.google.com/maps/@{lat},{lon},{zoom}z',
+                event_url_location: 'https://www.google.com/maps/search/{location}',
+                menu_shows_calendar_names: 'false',
+                menu_shows_description: 'false',
+                menu_shows_title: 'false',
+                skin: 'dark',
+                start_of_week: 'su',
+                'style-event-status-cancelled': 'true',
+                'style-event-status-confirmed': 'true',
+                'style-event-status-tentative': 'true',
+                tab: selectedTab,
+                tabs: '',
+                target: '_self',
+                title: 'My Calendar'
+            },
+            calendarUrls: {{CALENDAR_URLS}}
+        };
+        
+        // Add date parameter if provided
+        if (selectedDate) {
+            calendarConfig.params.date = selectedDate;
+        }
 
-        calendars.forEach(calendar => {
-            calendarParams.append("src", calendar);
-            calendarParams.append("color", defaultColor);
-        });
+        // Build calendar URL
+        const buildCalendarUrl = (config) => {
+            const url = new URL(config.baseUrl);
+            
+            // Add regular parameters
+            Object.entries(config.params).forEach(([key, value]) => {
+                if (value !== '' && value !== null) {
+                    url.searchParams.append(key, value);
+                }
+            });
+            
+            // Add multiple calendar URLs (open-web-calendar supports multiple url parameters)
+            config.calendarUrls.forEach(calendarUrl => {
+                url.searchParams.append('url', calendarUrl);
+            });
+            
+            return url.toString();
+        };
 
-        document.getElementById("calendarFrame").src = calendarBaseURL + calendarParams.toString();
+        // Set iframe source
+        document.getElementById('open-web-calendar').src = buildCalendarUrl(calendarConfig);
 
         window.onload = () => document.body.removeAttribute('unresolved');
     </script>
 
 </body>
-
-<p style="text-align: center; font-size: 9px; color: #a2a2a2;">Copyright (c) 2025 dytsou</p>
 
 </html>
