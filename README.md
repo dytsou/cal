@@ -12,39 +12,64 @@ A simple calendar application that displays multiple calendar feeds using Open W
 
 ## Setup
 
+### 1. Configure Cloudflare Worker Secrets
+
+Calendar URLs are now managed via Cloudflare Worker secrets for better security and centralized management.
+
+**Set up your Cloudflare Worker secrets:**
+
+```bash
+# Set calendar URLs (comma-separated, can be plain or fernet:// encrypted)
+wrangler secret put CALENDAR_URL
+# Enter: https://calendar.google.com/calendar/ical/example%40gmail.com/public/basic.ics,https://calendar.google.com/calendar/ical/another%40gmail.com/public/basic.ics
+
+# Set encryption key (if using fernet:// encrypted URLs)
+wrangler secret put ENCRYPTION_KEY
+# Enter your Fernet encryption key (base64url-encoded 32-byte key)
+# Generate one with: node -e "console.log(require('crypto').randomBytes(32).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, ''))"
+```
+
+**Getting Google Calendar iCal URLs:**
+- Go to your Google Calendar settings
+- Find the calendar you want to share
+- Click "Integrate calendar" or "Get shareable link"
+- Copy the "Public URL to iCal format" link
+- URL-encode special characters (e.g., `@` becomes `%40`)
+
+### 2. Configure Local Development (Optional)
+
 1. Copy `.env.example` to `.env`:
 
    ```bash
    cp .env.example .env
    ```
 
-2. Edit `.env` and add your calendar URLs (comma-separated):
+2. Edit `.env` and set your Cloudflare Worker URL (optional):
 
    ```
-   CALENDAR_URL=https://calendar.google.com/calendar/ical/example%40gmail.com/public/basic.ics,https://calendar.google.com/calendar/ical/another%40gmail.com/public/basic.ics
+   WORKER_URL=https://cal-proxy.yourdomain.com
    ```
 
-   **Getting Google Calendar iCal URLs:**
-   - Go to your Google Calendar settings
-   - Find the calendar you want to share
-   - Click "Integrate calendar" or "Get shareable link"
-   - Copy the "Public URL to iCal format" link
-   - URL-encode special characters (e.g., `@` becomes `%40`)
+   If not set, defaults to `https://open-web-calendar.hosted.quelltext.eu`
 
-3. Build the HTML file:
+### 3. Build the HTML File
 
-   ```bash
-   # Option 1: Using npm/pnpm (after installing)
-   pnpm install
-   pnpm run build
-   # or use the global command if installed globally
-   calendar-build
+```bash
+# Option 1: Using npm/pnpm (after installing)
+pnpm install
+pnpm run build
+# or use the global command if installed globally
+calendar-build
 
-   # Option 2: Direct execution
-   node scripts/build.js
-   ```
+# Option 2: Direct execution
+node scripts/build.js
+```
 
-4. Open `index.html` in your browser.
+### 4. Deploy and Open
+
+- Deploy `index.html` to your hosting service (GitHub Pages, etc.)
+- Open the deployed page in your browser
+- The Cloudflare Worker will automatically add calendar URLs from secrets to all requests
 
 ## URL Parameters
 
@@ -154,14 +179,16 @@ pnpm install -g @dytsou/calendar-build
 
 The build script:
 
-1. Reads `CALENDAR_URL` from `.env` (supports comma-separated multiple URLs)
-2. Replaces `{{CALENDAR_URLS}}` placeholder in the template
+1. Reads `WORKER_URL` from `.env` (optional, defaults to open-web-calendar)
+2. Replaces `{{WORKER_URL}}` placeholder in the template
 3. Updates `{{YEAR}}` placeholder with current year in LICENSE and HTML
 4. Generates `index.html` ready for deployment
 
+**Note:** Calendar URLs are now managed via Cloudflare Worker secrets (`CALENDAR_URL`), not in `.env` or the HTML file. The worker automatically adds them to all calendar requests.
+
 ## Cloudflare Worker Setup
 
-This project uses a Cloudflare Worker to decrypt `fernet://` URLs server-side. The worker keeps calendar URLs encrypted in the iframe src while decrypting them server-side.
+This project uses a Cloudflare Worker to manage calendar URLs securely. Calendar URLs are stored as Cloudflare Worker secrets, keeping them out of the HTML and GitHub secrets.
 
 ### Setup Instructions
 
@@ -183,13 +210,29 @@ This project uses a Cloudflare Worker to decrypt `fernet://` URLs server-side. T
    wrangler login
    ```
 
-4. **Set Encryption Key Secret:**
+4. **Set Calendar URLs Secret:**
+   ```bash
+   wrangler secret put CALENDAR_URL
+   ```
+   When prompted, enter your calendar URLs (comma-separated):
+   ```
+   https://calendar.google.com/calendar/ical/example%40gmail.com/public/basic.ics,https://calendar.google.com/calendar/ical/another%40gmail.com/public/basic.ics
+   ```
+   
+   **Note:** URLs can be plain or `fernet://` encrypted. If using encrypted URLs, you'll also need to set `ENCRYPTION_KEY`.
+
+5. **Set Encryption Key Secret (if using fernet:// encrypted URLs):**
    ```bash
    wrangler secret put ENCRYPTION_KEY
    ```
-   When prompted, enter your Fernet encryption key (the same one from your `.env` file).
+   When prompted, enter your Fernet encryption key (base64url-encoded 32-byte key).
+   
+   Generate one with:
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(32).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, ''))"
+   ```
 
-5. **Deploy the Worker:**
+6. **Deploy the Worker:**
    ```bash
    wrangler deploy
    ```

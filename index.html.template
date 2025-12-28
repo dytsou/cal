@@ -239,8 +239,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
                 tabs: '',
                 target: '_self',
                 title: 'My Calendar'
-            },
-            calendarUrls: {{CALENDAR_URLS}}
+            }
         };
         
         // Add date parameter if provided
@@ -249,8 +248,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
         }
 
         // Build calendar URL
-        // Note: fernet:// URLs are passed directly to Cloudflare Worker
-        // The worker decrypts them server-side before forwarding to open-web-calendar
+        // Note: Calendar URLs are stored in Cloudflare Worker secrets
+        // The worker automatically adds them to all requests
         const buildCalendarUrl = (config) => {
             const url = new URL(config.baseUrl);
             
@@ -261,13 +260,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
                 }
             });
             
-            // Add fernet:// URLs directly - Cloudflare Worker will decrypt them server-side
-            // This keeps the URLs encrypted in the iframe src (visible in developer tools)
-            config.calendarUrls.forEach(fernetUrl => {
-                // Pass fernet:// URLs directly to the worker
-                // The worker will decrypt them before forwarding to open-web-calendar
-                url.searchParams.append('url', fernetUrl);
-            });
+            // Calendar URLs are handled by the Cloudflare Worker from secrets
+            // No need to pass them in the URL
             
             return url.toString();
         };
