@@ -143,6 +143,52 @@ async function decryptFernetUrl(fernetUrl, secretKey) {
   return await decryptFernetToken(token, secretKey);
 }
 
+/**
+ * Sanitize response body to hide calendar URLs in error messages
+ */
+async function sanitizeResponse(response) {
+  const contentType = response.headers.get('content-type') || '';
+  
+  // Only sanitize text-based responses
+  if (!contentType.includes('text/html') && 
+      !contentType.includes('application/json') && 
+      !contentType.includes('text/javascript') &&
+      !contentType.includes('application/javascript')) {
+    // For non-text responses, just add CORS header and return
+    const responseHeaders = new Headers(response.headers);
+    responseHeaders.set('Access-Control-Allow-Origin', '*');
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+    });
+  }
+  
+  const body = await response.text();
+  
+  // Patterns to detect and sanitize calendar URLs
+  const urlPatterns = [
+    /https?:\/\/[^\s"']+\.ics/gi,
+    /https?:\/\/calendar\.google\.com\/calendar\/ical\/[^\s"']+/gi,
+    /%40[^\s"']+/gi, // URL-encoded @ symbols
+    /@[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi, // Email patterns in URLs
+  ];
+  
+  let sanitizedBody = body;
+  urlPatterns.forEach(pattern => {
+    sanitizedBody = sanitizedBody.replace(pattern, '[Calendar URL hidden]');
+  });
+  
+  const responseHeaders = new Headers(response.headers);
+  responseHeaders.set('Access-Control-Allow-Origin', '*');
+  
+  return new Response(sanitizedBody, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: responseHeaders,
+  });
+}
+
 export default {
   async fetch(request, env) {
     try {
@@ -265,14 +311,8 @@ export default {
           headers: requestHeaders,
         });
         
-        const responseHeaders = new Headers(response.headers);
-        responseHeaders.set('Access-Control-Allow-Origin', '*');
-        
-        return new Response(response.body, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: responseHeaders,
-        });
+        // Sanitize response to hide calendar URLs in error messages
+        return await sanitizeResponse(response);
       }
       
       // Only decrypt fernet:// URLs if:
@@ -302,14 +342,8 @@ export default {
           headers: requestHeaders,
         });
         
-        const responseHeaders = new Headers(response.headers);
-        responseHeaders.set('Access-Control-Allow-Origin', '*');
-        
-        return new Response(response.body, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: responseHeaders,
-        });
+        // Sanitize response to hide calendar URLs in error messages
+        return await sanitizeResponse(response);
       }
       
       // Decrypt fernet:// URLs
@@ -365,13 +399,10 @@ export default {
         responseHeaders.set('Set-Cookie', `owc_urls=${cookieValue}; Path=/; SameSite=Lax; Max-Age=3600`);
       }
       
-      // Return the response with proper headers
-      // Important: Don't modify the response body, just pass it through
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: responseHeaders,
-      });
+      // Sanitize response to hide calendar URLs in error messages
+      // Clone response first to avoid modifying the original
+      const clonedResponse = response.clone();
+      return await sanitizeResponse(clonedResponse);
     } catch (error) {
       return new Response(`Error: ${error.message}`, { 
         status: 500,

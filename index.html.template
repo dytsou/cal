@@ -40,6 +40,11 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
             width: 100%;
             height: calc(100vh - 25px);
         }
+
+        /* Hide error messages that might expose calendar URLs */
+        iframe {
+            /* Note: Cross-origin iframe content cannot be styled directly */
+        }
     </style>
 </head>
 
@@ -54,6 +59,105 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
     <p style="position: absolute; bottom: 2px; left: 0; right: 0; text-align: center; font-size: 9px; color: #ffffff; background-color: #000000; margin: 0; padding: 4px; pointer-events: none;">Copyright (c) {{YEAR}} dytsou</p>
 
     <script>
+        // Filter console logs to hide calendar URLs and sensitive information
+        (function() {
+            const originalError = console.error;
+            const originalLog = console.log;
+            const originalWarn = console.warn;
+            const originalInfo = console.info;
+            
+            // Patterns to detect and sanitize calendar URLs in error messages
+            const urlPatterns = [
+                /https?:\/\/[^\s"']+\.ics/gi,
+                /https?:\/\/calendar\.google\.com\/calendar\/ical\/[^\s"']+/gi,
+                /%40[^\s"']+/gi, // URL-encoded @ symbols
+                /@[^\s"']+\.ics/gi, // @ symbols in URLs
+            ];
+            
+            function sanitizeMessage(message) {
+                if (typeof message !== 'string') {
+                    return message;
+                }
+                let sanitized = message;
+                urlPatterns.forEach(pattern => {
+                    sanitized = sanitized.replace(pattern, '[Calendar URL hidden]');
+                });
+                return sanitized;
+            }
+            
+            function sanitizeArgs(args) {
+                return args.map(arg => {
+                    if (typeof arg === 'string') {
+                        return sanitizeMessage(arg);
+                    } else if (arg && typeof arg === 'object') {
+                        // Try to sanitize object string representations
+                        try {
+                            const str = JSON.stringify(arg);
+                            const sanitized = sanitizeMessage(str);
+                            if (sanitized !== str) {
+                                return JSON.parse(sanitized);
+                            }
+                        } catch (e) {
+                            // If JSON parsing fails, return original
+                        }
+                    }
+                    return arg;
+                });
+            }
+            
+            console.error = function(...args) {
+                // Check if message contains calendar URL patterns
+                const message = args.join(' ');
+                if (urlPatterns.some(pattern => pattern.test(message))) {
+                    // Replace with sanitized version
+                    const sanitized = sanitizeArgs(args);
+                    originalError.apply(console, sanitized);
+                } else {
+                    originalError.apply(console, args);
+                }
+            };
+            
+            console.log = function(...args) {
+                const message = args.join(' ');
+                // Filter out calendar-related logs and HTTPError messages
+                if (message.includes('Calendar Info:') || 
+                    message.includes('HTTPError') ||
+                    message.includes('Error in ConvertToCalendars') ||
+                    urlPatterns.some(pattern => pattern.test(message))) {
+                    // Don't log or sanitize and log
+                    if (urlPatterns.some(pattern => pattern.test(message))) {
+                        const sanitized = sanitizeArgs(args);
+                        originalLog.apply(console, sanitized);
+                    }
+                    return;
+                }
+                originalLog.apply(console, args);
+            };
+            
+            console.warn = function(...args) {
+                const message = args.join(' ');
+                if (urlPatterns.some(pattern => pattern.test(message))) {
+                    const sanitized = sanitizeArgs(args);
+                    originalWarn.apply(console, sanitized);
+                } else {
+                    originalWarn.apply(console, args);
+                }
+            };
+            
+            console.info = function(...args) {
+                const message = args.join(' ');
+                if (message.includes('Calendar Info:') || 
+                    urlPatterns.some(pattern => pattern.test(message))) {
+                    if (urlPatterns.some(pattern => pattern.test(message))) {
+                        const sanitized = sanitizeArgs(args);
+                        originalInfo.apply(console, sanitized);
+                    }
+                    return;
+                }
+                originalInfo.apply(console, args);
+            };
+        })();
+        
         // Get mode from URL parameter (e.g., ?mode=month, ?mode=week, ?mode=day)
         const urlParams = new URLSearchParams(window.location.search);
         const requestedMode = urlParams.get('mode');
@@ -169,7 +273,38 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
         };
 
         // Set iframe source
-        document.getElementById('open-web-calendar').src = buildCalendarUrl(calendarConfig);
+        const iframe = document.getElementById('open-web-calendar');
+        iframe.src = buildCalendarUrl(calendarConfig);
+
+        // Intercept and filter error messages from iframe
+        // Note: This only works if iframe is same-origin
+        iframe.addEventListener('load', function() {
+            try {
+                // Try to access iframe content (only works if same-origin)
+                const iframeWindow = iframe.contentWindow;
+                if (iframeWindow) {
+                    // Override console methods in iframe
+                    const originalIframeError = iframeWindow.console.error;
+                    const urlPatterns = [
+                        /https?:\/\/[^\s"']+\.ics/gi,
+                        /calendar\.google\.com\/calendar\/ical\/[^\s"']+/gi,
+                        /%40[^\s"']+/gi,
+                    ];
+                    
+                    iframeWindow.console.error = function(...args) {
+                        const message = args.join(' ');
+                        if (urlPatterns.some(pattern => pattern.test(message))) {
+                            // Don't log errors with calendar URLs
+                            return;
+                        }
+                        originalIframeError.apply(iframeWindow.console, args);
+                    };
+                }
+            } catch (e) {
+                // Cross-origin restriction - can't access iframe content
+                // Console filtering on parent page will still work
+            }
+        });
 
         window.onload = () => document.body.removeAttribute('unresolved');
     </script>
