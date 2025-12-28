@@ -58,6 +58,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
         const urlParams = new URLSearchParams(window.location.search);
         const requestedMode = urlParams.get('mode');
         const requestedDate = urlParams.get('date');
+        const requestedTheme = urlParams.get('theme');
         
         // Valid modes and their mapping to open-web-calendar tab values
         const validModes = ['month', 'week', 'day'];
@@ -72,9 +73,23 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
             }
         }
         
-        // Determine the theme based on browser preference
-        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        const selectedTheme = prefersDark ? 'dark' : 'light';
+        // Determine the theme: URL parameter takes precedence, then browser preference
+        const validThemes = ['dark', 'light'];
+        let selectedTheme;
+        if (requestedTheme) {
+            const normalizedTheme = requestedTheme.toLowerCase();
+            if (validThemes.includes(normalizedTheme)) {
+                selectedTheme = normalizedTheme;
+            } else {
+                // Invalid theme parameter, fall back to browser preference
+                const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+                selectedTheme = prefersDark ? 'dark' : 'light';
+            }
+        } else {
+            // No theme parameter, use browser preference
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            selectedTheme = prefersDark ? 'dark' : 'light';
+        }
         
         // Parse and validate date parameter (YYYYMMDD format)
         let selectedDate = null;

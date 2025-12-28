@@ -54,14 +54,18 @@ The calendar supports URL parameters for navigation:
 - **`?mode=week`** - Show week view (default)
 - **`?mode=day`** - Show day view
 - **`?date=YYYYMMDD`** - Navigate to a specific date (e.g., `?date=20250115`)
+- **`?theme=dark`** - Force dark theme
+- **`?theme=light`** - Force light theme
 
-**Theme:** The calendar automatically uses your browser's color scheme preference (dark or light mode).
+**Theme:** The calendar uses your browser's color scheme preference by default. You can override it using the `?theme=` URL parameter.
 
 **Examples:**
 
-- `index.html?mode=month` - Month view
+- `index.html?mode=month` - Month view (uses browser theme preference)
 - `index.html?mode=week&date=20250115` - Week view for the week containing January 15, 2025
 - `index.html?mode=day&date=20250320` - Day view for March 20, 2025
+- `index.html?theme=light` - Light theme with default week view
+- `index.html?mode=month&theme=dark` - Month view with dark theme
 
 ## Install Package
 
