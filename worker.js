@@ -700,6 +700,24 @@ function mergeConsecutiveEvents(events, userEmails = []) {
 }
 
 /**
+ * Remove calendar name from calendar object
+ * @param {Object} calendar - The calendar object
+ */
+function removeCalendarName(calendar) {
+  if (!calendar || typeof calendar !== 'object') {
+    return calendar;
+  }
+  
+  // Create a copy of the calendar object without the name field
+  const sanitized = { ...calendar };
+  delete sanitized.name;
+  delete sanitized.calendarName;
+  delete sanitized.title;
+  
+  return sanitized;
+}
+
+/**
  * Process calendar events JSON and merge consecutive events
  */
 /**
@@ -737,34 +755,44 @@ function processCalendarEventsJson(jsonData, userEmails = []) {
     // Check for nested structures
     if (Array.isArray(jsonData.events)) {
       // Format: {events: [...], ...}
+      // Remove calendar name from root level
+      const sanitizedRoot = removeCalendarName(jsonData);
       return {
-        ...jsonData,
+        ...sanitizedRoot,
         events: mergeConsecutiveEvents(jsonData.events, userEmails)
       };
     } else if (Array.isArray(jsonData.calendars)) {
       // Format: {calendars: [{events: [...]}, ...], ...}
+      // Remove calendar name from root level as well
+      const sanitizedRoot = removeCalendarName(jsonData);
+      
       return {
-        ...jsonData,
+        ...sanitizedRoot,
         calendars: jsonData.calendars.map(calendar => {
-          if (Array.isArray(calendar.events)) {
+          // Remove calendar name from calendar object
+          const sanitizedCalendar = removeCalendarName(calendar);
+          
+          if (Array.isArray(sanitizedCalendar.events)) {
             return {
-              ...calendar,
-              events: mergeConsecutiveEvents(calendar.events, userEmails)
+              ...sanitizedCalendar,
+              events: mergeConsecutiveEvents(sanitizedCalendar.events, userEmails)
             };
           }
-          return calendar;
+          return sanitizedCalendar;
         })
       };
     } else if (Array.isArray(jsonData.data)) {
       // Format: {data: [...], ...}
+      const sanitizedRoot = removeCalendarName(jsonData);
       return {
-        ...jsonData,
+        ...sanitizedRoot,
         data: mergeConsecutiveEvents(jsonData.data, userEmails)
       };
     } else if (Array.isArray(jsonData.items)) {
       // Format: {items: [...], ...}
+      const sanitizedRoot = removeCalendarName(jsonData);
       return {
-        ...jsonData,
+        ...sanitizedRoot,
         items: mergeConsecutiveEvents(jsonData.items, userEmails)
       };
     }
@@ -777,8 +805,9 @@ function processCalendarEventsJson(jsonData, userEmails = []) {
           const hasTimeField = getEventTime(firstItem, 'start') !== null || 
                               getEventTime(firstItem, 'end') !== null;
           if (hasTimeField) {
+            const sanitizedRoot = removeCalendarName(jsonData);
             return {
-              ...jsonData,
+              ...sanitizedRoot,
               [key]: mergeConsecutiveEvents(jsonData[key], userEmails)
             };
           }
@@ -787,7 +816,10 @@ function processCalendarEventsJson(jsonData, userEmails = []) {
     }
   }
   
-  // Unknown format, return as-is
+  // Unknown format, remove calendar name if present and return
+  if (jsonData && typeof jsonData === 'object') {
+    return removeCalendarName(jsonData);
+  }
   return jsonData;
 }
 
