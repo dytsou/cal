@@ -5,17 +5,22 @@
  * 1. Reads CALENDAR_URL from Cloudflare Worker secrets (comma-separated)
  * 2. Decrypts fernet:// URLs using Fernet encryption (ENCRYPTION_METHOD is hardcoded to 'fernet')
  * 3. Forwards the request to open-web-calendar with decrypted URLs
- * 4. Returns the calendar HTML
+ * 4. Filters out events declined by user (based on USER_EMAILS secret)
+ * 5. Sanitizes non-PUBLIC events to only show busy time
+ * 6. Returns the calendar HTML
  * 
  * Configuration:
  * - ENCRYPTION_METHOD: Hardcoded to 'fernet' (not configurable)
  * - ENCRYPTION_KEY: Required Cloudflare Worker secret (for decrypting fernet:// URLs)
  * - CALENDAR_URL: Required Cloudflare Worker secret (comma-separated, can be plain or fernet:// encrypted)
+ * - USER_EMAILS: Optional Cloudflare Worker secret (comma-separated list of user emails for declined event filtering)
  * 
  * Usage:
  * 1. Set CALENDAR_URL secret: wrangler secret put CALENDAR_URL
  * 2. Set ENCRYPTION_KEY secret: wrangler secret put ENCRYPTION_KEY
- * 3. Deploy: wrangler deploy
+ * 3. Set USER_EMAILS secret: wrangler secret put USER_EMAILS
+ *    (e.g., "user1@gmail.com,user2@example.com,user3@domain.org")
+ * 4. Deploy: wrangler deploy
  */
 
 // Import Fernet library - we'll need to bundle this for Workers
@@ -266,7 +271,7 @@ function getEventTime(event, field) {
  * Extract event title (handles various field name formats)
  */
 function getEventTitle(event) {
-  return event.title || event.summary || event.name || '';
+  return event.title || event.summary || event.name || event.text || '';
 }
 
 /**
@@ -284,17 +289,283 @@ function getCalendarId(event) {
 }
 
 /**
- * Merge consecutive events within the same calendar
- * Events are consecutive if event1.end === event2.start (exact match)
+ * Extract event CLASS property (handles various field name formats)
+ * Returns null if not found (missing CLASS defaults to PRIVATE for privacy)
  */
-function mergeConsecutiveEvents(events) {
+function getEventClass(event) {
+  // Check various possible field names for CLASS property
+  // iCal format uses CLASS, but different parsers may use different field names
+  let classValue = event.class || 
+                   event.CLASS || 
+                   event.classification || 
+                   event['CLASS'] ||
+                   event['class'] ||
+                   null;
+  
+  // Check nested properties structure (common in some iCal parsers)
+  if (!classValue && event.properties) {
+    classValue = event.properties.CLASS || 
+                 event.properties.class || 
+                 event.properties.CLASS?.value ||
+                 event.properties.class?.value ||
+                 null;
+  }
+  
+  // Check inside 'ical' field - open-web-calendar stores raw iCal data here
+  if (!classValue && event.ical) {
+    // ical might be a string containing raw iCal data or an object
+    if (typeof event.ical === 'string') {
+      // Parse CLASS from raw iCal string (e.g., "CLASS:PUBLIC" or "CLASS:PRIVATE")
+      const classMatch = event.ical.match(/CLASS[:\s]*([A-Za-z]+)/i);
+      if (classMatch) {
+        classValue = classMatch[1];
+      }
+    } else if (typeof event.ical === 'object') {
+      classValue = event.ical.CLASS || event.ical.class || null;
+    }
+  }
+  
+  // If no CLASS property found, return null (will be treated as PRIVATE by default)
+  if (classValue === null || classValue === undefined || classValue === '') {
+    return null;
+  }
+  
+  // Normalize to uppercase string for comparison
+  return String(classValue).toUpperCase();
+}
+
+/**
+ * Check if event is PUBLIC
+ * Only returns true if CLASS is explicitly set to 'PUBLIC'
+ * Missing CLASS (null) defaults to PRIVATE - only shows start/end time
+ * Any other value (PRIVATE, CONFIDENTIAL, etc.) also returns false
+ */
+function isPublicEvent(event) {
+  const eventClass = getEventClass(event);
+  // Only return true if CLASS is explicitly PUBLIC
+  // null (missing CLASS) defaults to PRIVATE - only show time, no details
+  // Any other value (PRIVATE, CONFIDENTIAL, etc.) also means non-PUBLIC
+  return eventClass === 'PUBLIC';
+}
+
+/**
+ * Remove all identifying information from an event object
+ * This function is used to sanitize non-PUBLIC events
+ */
+function removeAllEventInfo(event) {
+  // Remove ALL identifying information - only keep time fields
+  event.title = '';
+  event.summary = '';
+  event.name = '';
+  event.text = 'BUSY';  // open-web-calendar uses 'text' field for title
+  event.description = '';
+  event.desc = '';
+  event.location = '';
+  event.loc = '';
+  event.url = '';
+  event.link = '';
+  event.organizer = '';
+  event.attendees = '';
+  event.attendee = '';
+  event.participants = '';  // open-web-calendar uses 'participants'
+  event.label = '';
+  event.notes = '';
+  event.note = '';
+  event.comment = '';
+  event.comments = '';
+  
+  // CRITICAL: Remove ical field which contains raw iCal data with all event details
+  // This prevents any sensitive information from being exposed in the response
+  event.ical = '';
+  
+  // Remove other fields that might contain identifying information
+  event.uid = '';  // Remove unique identifier
+  event.id = '';  // Remove ID if present
+  event.categories = '';  // Remove categories
+  event.color = '';  // Remove color
+  event.css_classes = '';  // Remove CSS classes
+  event.owc = '';  // Remove open-web-calendar specific data
+  event.recurrence = '';  // Remove recurrence info
+  event.sequence = '';  // Remove sequence
+  event.type = '';  // Remove type
+  
+  // Mark this event as sanitized
+  event._isNonPublic = true;
+  
+  return event;
+}
+
+/**
+ * Sanitize non-PUBLIC events to only show start and end times
+ * Removes title, description, location, and other details
+ */
+function sanitizeNonPublicEvent(event) {
+  const eventClass = getEventClass(event);
+  const isPublic = isPublicEvent(event);
+  
+  // If CLASS is PUBLIC, return event as-is (no sanitization)
+  if (isPublic) {
+    return event;
+  }
+  
+  // For non-PUBLIC events (PRIVATE, CONFIDENTIAL, missing CLASS, or any other value), sanitize
+  // Create a sanitized version with only time fields
+  // Start with a copy of the event to preserve structure
+  const sanitized = { ...event };
+  
+  // Remove ALL identifying information - only keep time fields
+  removeAllEventInfo(sanitized);
+  
+  // Only preserve time fields, calendar ID, and CLASS property
+  // All other fields have been removed to prevent information leakage
+  
+  return sanitized;
+}
+
+/**
+ * Parse user emails from environment secret
+ * USER_EMAILS secret should be comma-separated list of emails
+ * e.g., "user1@gmail.com,user2@example.com,user3@domain.org"
+ */
+function parseUserEmails(userEmailsSecret) {
+  if (!userEmailsSecret) {
+    return [];
+  }
+  return userEmailsSecret
+    .split(',')
+    .map(email => email.trim().toLowerCase())
+    .filter(email => email.length > 0);
+}
+
+/**
+ * Check if event is declined by the calendar owner (user responded "no")
+ * Returns true ONLY if the event is explicitly marked as declined by the calendar owner
+ * 
+ * For calendar invitations:
+ * - When YOU decline an event, the event STATUS is still CONFIRMED
+ * - But YOUR PARTSTAT (participation status) becomes DECLINED
+ * - We need to check for PARTSTAT=DECLINED in YOUR ATTENDEE line specifically
+ * - Other attendees declining should NOT filter the event
+ * 
+ * @param {Object} event - The event object to check
+ * @param {string[]} userEmails - Array of user email addresses to check for declined status
+ */
+function isEventDeclined(event, userEmails = []) {
+  const title = event.text || event.title || event.summary || '(no title)';
+  const cssClasses = event['css-classes'] || event.css_classes || event.cssClasses || [];
+  const eventType = event.type || '';
+  const ical = event.ical || '';
+  
+  // Check css-classes for declined indicator
+  // open-web-calendar uses an array of classes like:
+  // ['event', 'STATUS-CONFIRMED', 'CLASS-PUBLIC', etc.]
+  // We look for 'STATUS-DECLINED' or 'PARTSTAT-DECLINED' class
+  if (Array.isArray(cssClasses)) {
+    for (const cls of cssClasses) {
+      const lowerCls = String(cls).toLowerCase();
+      // Only match exact status classes, not just containing 'declined'
+      if (lowerCls === 'status-declined' || 
+          lowerCls === 'partstat-declined') {
+        console.log('[Declined Check] FILTERED - css-class declined:', title);
+        return true;
+      }
+    }
+  }
+  
+  // Check the event's own type/status field
+  if (eventType) {
+    const upperType = String(eventType).toUpperCase();
+    if (upperType === 'DECLINED' || upperType === 'CANCELLED') {
+      console.log('[Declined Check] FILTERED - type declined/cancelled:', title);
+      return true;
+    }
+  }
+  
+  // Check ical field for the USER's PARTSTAT=DECLINED
+  if (ical && typeof ical === 'string') {
+    // Check for STATUS:CANCELLED or STATUS:DECLINED (entire event cancelled)
+    const cancelledPattern = /^STATUS:(CANCELLED|DECLINED)/im;
+    if (cancelledPattern.test(ical)) {
+      console.log('[Declined Check] FILTERED - event STATUS cancelled:', title);
+      return true;
+    }
+    
+    // Check for PARTSTAT=DECLINED in the user's ATTENDEE line
+    // Format: ATTENDEE;...;PARTSTAT=DECLINED;...:mailto:user@email.com
+    // We need to find ATTENDEE lines that contain both PARTSTAT=DECLINED AND a user email
+    
+    // Split ical into lines and look for ATTENDEE lines
+    // Note: ATTENDEE lines can be folded (continuation lines start with space)
+    const icalLines = ical.replace(/\r\n /g, '').split(/\r?\n/);
+    
+    for (const line of icalLines) {
+      if (line.startsWith('ATTENDEE')) {
+        // Check if this attendee line has PARTSTAT=DECLINED
+        if (/PARTSTAT=DECLINED/i.test(line)) {
+          // Check if this is for one of the user's emails
+          for (const userEmail of userEmails) {
+            if (line.toLowerCase().includes(userEmail.toLowerCase())) {
+              console.log('[Declined Check] FILTERED - user PARTSTAT=DECLINED:', title, '| email:', userEmail);
+              return true;
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  // Check if event has explicit status field indicating declined/cancelled
+  const eventStatus = event.event_status || event.status || null;
+  if (eventStatus) {
+    const normalizedStatus = String(eventStatus).toUpperCase();
+    if (normalizedStatus === 'CANCELLED' || normalizedStatus === 'DECLINED') {
+      console.log('[Declined Check] FILTERED - event_status:', title);
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Filter out declined events (events where user responded "no")
+ * @param {Array} events - Array of events to filter
+ * @param {string[]} userEmails - Array of user email addresses to check for declined status
+ */
+function filterDeclinedEvents(events, userEmails = []) {
   if (!Array.isArray(events) || events.length === 0) {
     return events;
   }
   
+  console.log('[Filter Declined] Processing', events.length, 'events');
+  
+  const filteredEvents = events.filter(event => !isEventDeclined(event, userEmails));
+  
+  console.log('[Filter Declined] After filtering:', filteredEvents.length, 'events remain');
+  
+  return filteredEvents;
+}
+
+/**
+ * Merge consecutive events within the same calendar
+ * Events are consecutive if event1.end === event2.start (exact match)
+ * @param {Array} events - Array of events to process
+ * @param {string[]} userEmails - Array of user email addresses to check for declined status
+ */
+function mergeConsecutiveEvents(events, userEmails = []) {
+  if (!Array.isArray(events) || events.length === 0) {
+    return events;
+  }
+  
+  // Filter out declined events first
+  const filteredEvents = filterDeclinedEvents(events, userEmails);
+  
+  // Sanitize non-PUBLIC events
+  const sanitizedEvents = filteredEvents.map(event => sanitizeNonPublicEvent(event));
+  
   // Group events by calendar identifier
   const eventsByCalendar = {};
-  for (const event of events) {
+  for (const event of sanitizedEvents) {
     const calendarId = getCalendarId(event);
     if (!eventsByCalendar[calendarId]) {
       eventsByCalendar[calendarId] = [];
@@ -321,6 +592,7 @@ function mergeConsecutiveEvents(events) {
     
     for (let i = 0; i < calendarEvents.length; i++) {
       const event = calendarEvents[i];
+      // Event is already sanitized, but we need to preserve it during merge
       const startTime = getEventTime(event, 'start');
       const endTime = getEventTime(event, 'end');
       
@@ -345,33 +617,42 @@ function mergeConsecutiveEvents(events) {
         const normalizedStartTime = normalizeDate(startTime);
         
         if (normalizedEndTime && normalizedStartTime && normalizedEndTime === normalizedStartTime) {
-          // Merge: combine titles and extend end time
-          const currentTitle = getEventTitle(currentMerge);
-          const eventTitle = getEventTitle(event);
-          const combinedTitle = currentTitle && eventTitle 
-            ? `${currentTitle} + ${eventTitle}`
-            : currentTitle || eventTitle;
+          // Check if either event is non-PUBLIC - if so, keep titles empty
+          const currentIsNonPublic = currentMerge._isNonPublic || !isPublicEvent(currentMerge);
+          const eventIsNonPublic = event._isNonPublic || !isPublicEvent(event);
           
-          // Update title field (try common variations)
-          if (currentMerge.title !== undefined) currentMerge.title = combinedTitle;
-          if (currentMerge.summary !== undefined) currentMerge.summary = combinedTitle;
-          if (currentMerge.name !== undefined) currentMerge.name = combinedTitle;
-          if (!currentMerge.title && !currentMerge.summary && !currentMerge.name) {
-            currentMerge.title = combinedTitle;
-          }
-          
-          // Combine descriptions
-          const currentDesc = getEventDescription(currentMerge);
-          const eventDesc = getEventDescription(event);
-          if (currentDesc || eventDesc) {
-            const combinedDesc = currentDesc && eventDesc
-              ? `${currentDesc}\n\n${eventDesc}`
-              : currentDesc || eventDesc;
+          if (currentIsNonPublic || eventIsNonPublic) {
+            // At least one event is non-PUBLIC, remove ALL identifying information
+            removeAllEventInfo(currentMerge);
+          } else {
+            // Both are PUBLIC, merge titles normally
+            const currentTitle = getEventTitle(currentMerge);
+            const eventTitle = getEventTitle(event);
+            const combinedTitle = currentTitle && eventTitle 
+              ? `${currentTitle} + ${eventTitle}`
+              : currentTitle || eventTitle;
             
-            if (currentMerge.description !== undefined) currentMerge.description = combinedDesc;
-            if (currentMerge.desc !== undefined) currentMerge.desc = combinedDesc;
-            if (!currentMerge.description && !currentMerge.desc) {
-              currentMerge.description = combinedDesc;
+            // Update title field (try common variations)
+            if (currentMerge.title !== undefined) currentMerge.title = combinedTitle;
+            if (currentMerge.summary !== undefined) currentMerge.summary = combinedTitle;
+            if (currentMerge.name !== undefined) currentMerge.name = combinedTitle;
+            if (!currentMerge.title && !currentMerge.summary && !currentMerge.name) {
+              currentMerge.title = combinedTitle;
+            }
+            
+            // Combine descriptions
+            const currentDesc = getEventDescription(currentMerge);
+            const eventDesc = getEventDescription(event);
+            if (currentDesc || eventDesc) {
+              const combinedDesc = currentDesc && eventDesc
+                ? `${currentDesc}\n\n${eventDesc}`
+                : currentDesc || eventDesc;
+              
+              if (currentMerge.description !== undefined) currentMerge.description = combinedDesc;
+              if (currentMerge.desc !== undefined) currentMerge.desc = combinedDesc;
+              if (!currentMerge.description && !currentMerge.desc) {
+                currentMerge.description = combinedDesc;
+              }
             }
           }
           
@@ -421,17 +702,44 @@ function mergeConsecutiveEvents(events) {
 /**
  * Process calendar events JSON and merge consecutive events
  */
-function processCalendarEventsJson(jsonData) {
+/**
+ * Process calendar events JSON and merge consecutive events
+ * @param {Object|Array} jsonData - The calendar events data
+ * @param {string[]} userEmails - Array of user email addresses to check for declined status
+ */
+function processCalendarEventsJson(jsonData, userEmails = []) {
+  // Debug: Log first event structure to understand data format
+  // TODO: Remove or make conditional in production
+  try {
+    let firstEvent = null;
+    if (Array.isArray(jsonData) && jsonData.length > 0) {
+      firstEvent = jsonData[0];
+    } else if (jsonData && typeof jsonData === 'object') {
+      if (Array.isArray(jsonData.events) && jsonData.events.length > 0) {
+        firstEvent = jsonData.events[0];
+      } else if (Array.isArray(jsonData.calendars) && jsonData.calendars.length > 0) {
+        const firstCalendar = jsonData.calendars[0];
+        if (Array.isArray(firstCalendar.events) && firstCalendar.events.length > 0) {
+          firstEvent = firstCalendar.events[0];
+        }
+      }
+    }
+    
+    // Debug logging removed - CLASS detection is working
+  } catch (e) {
+    // Ignore errors
+  }
+  
   if (Array.isArray(jsonData)) {
     // Format: [{event1}, {event2}, ...]
-    return mergeConsecutiveEvents(jsonData);
+    return mergeConsecutiveEvents(jsonData, userEmails);
   } else if (jsonData && typeof jsonData === 'object') {
     // Check for nested structures
     if (Array.isArray(jsonData.events)) {
       // Format: {events: [...], ...}
       return {
         ...jsonData,
-        events: mergeConsecutiveEvents(jsonData.events)
+        events: mergeConsecutiveEvents(jsonData.events, userEmails)
       };
     } else if (Array.isArray(jsonData.calendars)) {
       // Format: {calendars: [{events: [...]}, ...], ...}
@@ -441,7 +749,7 @@ function processCalendarEventsJson(jsonData) {
           if (Array.isArray(calendar.events)) {
             return {
               ...calendar,
-              events: mergeConsecutiveEvents(calendar.events)
+              events: mergeConsecutiveEvents(calendar.events, userEmails)
             };
           }
           return calendar;
@@ -451,13 +759,13 @@ function processCalendarEventsJson(jsonData) {
       // Format: {data: [...], ...}
       return {
         ...jsonData,
-        data: mergeConsecutiveEvents(jsonData.data)
+        data: mergeConsecutiveEvents(jsonData.data, userEmails)
       };
     } else if (Array.isArray(jsonData.items)) {
       // Format: {items: [...], ...}
       return {
         ...jsonData,
-        items: mergeConsecutiveEvents(jsonData.items)
+        items: mergeConsecutiveEvents(jsonData.items, userEmails)
       };
     }
     // Unknown structure, try to find any array of events
@@ -471,7 +779,7 @@ function processCalendarEventsJson(jsonData) {
           if (hasTimeField) {
             return {
               ...jsonData,
-              [key]: mergeConsecutiveEvents(jsonData[key])
+              [key]: mergeConsecutiveEvents(jsonData[key], userEmails)
             };
           }
         }
@@ -486,9 +794,27 @@ function processCalendarEventsJson(jsonData) {
 /**
  * Sanitize response body to hide calendar URLs in error messages
  * Only sanitizes HTML and JSON responses to avoid breaking JavaScript code
+ * @param {Response} response - The response to sanitize
+ * @param {string} pathname - The request pathname
+ * @param {string[]} userEmails - Array of user email addresses to check for declined status
  */
-async function sanitizeResponse(response, pathname) {
+async function sanitizeResponse(response, pathname, userEmails = []) {
   const contentType = response.headers.get('content-type') || '';
+  
+  // Block ICS/calendar file downloads - check content type and pathname
+  if (contentType.includes('text/calendar') || 
+      contentType.includes('application/ics') ||
+      pathname.endsWith('.ics') || 
+      pathname.endsWith('.ICAL') || 
+      pathname.endsWith('.iCal')) {
+    return new Response('Calendar file download is not allowed', { 
+      status: 403,
+      headers: { 
+        'Content-Type': 'text/plain',
+        'Access-Control-Allow-Origin': '*'
+      }
+    });
+  }
   
   // Only sanitize HTML and JSON responses (error messages)
   // Skip JavaScript files to avoid breaking code
@@ -520,7 +846,7 @@ async function sanitizeResponse(response, pathname) {
     if (isCalendarEventsEndpoint) {
       try {
         const jsonData = JSON.parse(body);
-        const processedData = processCalendarEventsJson(jsonData);
+        const processedData = processCalendarEventsJson(jsonData, userEmails);
         sanitizedBody = JSON.stringify(processedData);
       } catch (error) {
         // If JSON parsing fails, continue with original body
@@ -568,6 +894,10 @@ export default {
       const encryptionKey = env.ENCRYPTION_KEY;
       const calendarUrlSecret = env.CALENDAR_URL; // Read from Cloudflare Worker secret
       
+      // Parse user emails from secret for declined event filtering
+      // USER_EMAILS secret should be comma-separated list of emails
+      const userEmails = parseUserEmails(env.USER_EMAILS);
+      
       if (!calendarUrlSecret) {
         return new Response('CALENDAR_URL not configured in Cloudflare Worker secrets', { 
           status: 500,
@@ -597,6 +927,17 @@ export default {
       
       // Get the pathname to determine request type
       const pathname = url.pathname;
+      
+      // Block ICS file downloads - prevent access to raw calendar files
+      if (pathname.endsWith('.ics') || pathname.endsWith('.ICAL') || pathname.endsWith('.iCal')) {
+        return new Response('Calendar file download is not allowed', { 
+          status: 403,
+          headers: { 
+            'Content-Type': 'text/plain',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      }
       
       // Check if this is the main calendar page request
       const isMainCalendarPage = pathname === '/' || 
@@ -669,8 +1010,8 @@ export default {
         });
         
         // Sanitize response to hide calendar URLs in error messages
-        // Pass pathname for calendar events processing
-        return await sanitizeResponse(response, pathname);
+        // Pass pathname for calendar events processing and user emails for declined filtering
+        return await sanitizeResponse(response, pathname, userEmails);
       }
       
       // Handle main calendar page requests - always add calendar URLs from secret
@@ -725,7 +1066,7 @@ export default {
         
         // Sanitize response to hide calendar URLs in error messages
         // Pass pathname for calendar events processing
-        return await sanitizeResponse(response, pathname);
+        return await sanitizeResponse(response, pathname, userEmails);
       }
       
       // For all other requests (static resources, etc.), proxy directly
@@ -751,7 +1092,7 @@ export default {
       
       // Sanitize response to hide calendar URLs in error messages
       // Pass pathname for calendar events processing
-      return await sanitizeResponse(response, pathname);
+      return await sanitizeResponse(response, pathname, userEmails);
     } catch (error) {
       return new Response(`Error: ${error.message}`, { 
         status: 500,
