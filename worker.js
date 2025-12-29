@@ -226,10 +226,268 @@ function injectConsoleFilter(html) {
 }
 
 /**
+ * Normalize date to ISO string for comparison
+ */
+function normalizeDate(dateValue) {
+  if (!dateValue) return null;
+  if (typeof dateValue === 'string') {
+    // Parse and return ISO string
+    const date = new Date(dateValue);
+    return isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  if (dateValue instanceof Date) {
+    return dateValue.toISOString();
+  }
+  // Try to convert to date
+  const date = new Date(dateValue);
+  return isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+/**
+ * Extract event time fields (handles various field name formats)
+ */
+function getEventTime(event, field) {
+  // Try common field name variations (including iCal and calendar.js formats)
+  const variations = {
+    start: ['start', 'startDate', 'start_time', 'startTime', 'dtstart', 'start_date', 'dateStart', 'date_start'],
+    end: ['end', 'endDate', 'end_time', 'endTime', 'dtend', 'end_date', 'dateEnd', 'date_end']
+  };
+  
+  const fieldNames = variations[field] || [field];
+  for (const name of fieldNames) {
+    if (event[name] !== undefined && event[name] !== null) {
+      return event[name];
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract event title (handles various field name formats)
+ */
+function getEventTitle(event) {
+  return event.title || event.summary || event.name || '';
+}
+
+/**
+ * Extract event description (handles various field name formats)
+ */
+function getEventDescription(event) {
+  return event.description || event.desc || '';
+}
+
+/**
+ * Extract calendar identifier (handles various field name formats)
+ */
+function getCalendarId(event) {
+  return event.calendar || event.calendarId || event.calendar_id || event.source || 'default';
+}
+
+/**
+ * Merge consecutive events within the same calendar
+ * Events are consecutive if event1.end === event2.start (exact match)
+ */
+function mergeConsecutiveEvents(events) {
+  if (!Array.isArray(events) || events.length === 0) {
+    return events;
+  }
+  
+  // Group events by calendar identifier
+  const eventsByCalendar = {};
+  for (const event of events) {
+    const calendarId = getCalendarId(event);
+    if (!eventsByCalendar[calendarId]) {
+      eventsByCalendar[calendarId] = [];
+    }
+    eventsByCalendar[calendarId].push(event);
+  }
+  
+  const mergedEvents = [];
+  
+  // Process each calendar group separately
+  for (const calendarId in eventsByCalendar) {
+    const calendarEvents = eventsByCalendar[calendarId];
+    
+    // Sort events by start time
+    calendarEvents.sort((a, b) => {
+      const startA = getEventTime(a, 'start');
+      const startB = getEventTime(b, 'start');
+      if (!startA || !startB) return 0;
+      return new Date(startA) - new Date(startB);
+    });
+    
+    // Merge consecutive events
+    let currentMerge = null;
+    
+    for (let i = 0; i < calendarEvents.length; i++) {
+      const event = calendarEvents[i];
+      const startTime = getEventTime(event, 'start');
+      const endTime = getEventTime(event, 'end');
+      
+      if (!startTime || !endTime) {
+        // If event is missing time info, add as-is
+        if (currentMerge) {
+          mergedEvents.push(currentMerge);
+          currentMerge = null;
+        }
+        mergedEvents.push(event);
+        continue;
+      }
+      
+      if (currentMerge === null) {
+        // Start a new merge group
+        currentMerge = { ...event };
+      } else {
+        // Check if this event is consecutive to the current merge
+        const currentEndTime = getEventTime(currentMerge, 'end');
+        // Normalize dates for comparison (handle different date formats)
+        const normalizedEndTime = normalizeDate(currentEndTime);
+        const normalizedStartTime = normalizeDate(startTime);
+        
+        if (normalizedEndTime && normalizedStartTime && normalizedEndTime === normalizedStartTime) {
+          // Merge: combine titles and extend end time
+          const currentTitle = getEventTitle(currentMerge);
+          const eventTitle = getEventTitle(event);
+          const combinedTitle = currentTitle && eventTitle 
+            ? `${currentTitle} + ${eventTitle}`
+            : currentTitle || eventTitle;
+          
+          // Update title field (try common variations)
+          if (currentMerge.title !== undefined) currentMerge.title = combinedTitle;
+          if (currentMerge.summary !== undefined) currentMerge.summary = combinedTitle;
+          if (currentMerge.name !== undefined) currentMerge.name = combinedTitle;
+          if (!currentMerge.title && !currentMerge.summary && !currentMerge.name) {
+            currentMerge.title = combinedTitle;
+          }
+          
+          // Combine descriptions
+          const currentDesc = getEventDescription(currentMerge);
+          const eventDesc = getEventDescription(event);
+          if (currentDesc || eventDesc) {
+            const combinedDesc = currentDesc && eventDesc
+              ? `${currentDesc}\n\n${eventDesc}`
+              : currentDesc || eventDesc;
+            
+            if (currentMerge.description !== undefined) currentMerge.description = combinedDesc;
+            if (currentMerge.desc !== undefined) currentMerge.desc = combinedDesc;
+            if (!currentMerge.description && !currentMerge.desc) {
+              currentMerge.description = combinedDesc;
+            }
+          }
+          
+          // Update end time - preserve original field name format
+          const originalEndField = getEventTime(currentMerge, 'end') !== null 
+            ? (currentMerge.end !== undefined ? 'end' :
+               currentMerge.endDate !== undefined ? 'endDate' :
+               currentMerge.end_time !== undefined ? 'end_time' :
+               currentMerge.endTime !== undefined ? 'endTime' :
+               currentMerge.dtend !== undefined ? 'dtend' :
+               currentMerge.end_date !== undefined ? 'end_date' :
+               currentMerge.dateEnd !== undefined ? 'dateEnd' :
+               currentMerge.date_end !== undefined ? 'date_end' : 'end')
+            : 'end';
+          
+          // Update all possible end time fields to ensure compatibility
+          if (currentMerge.end !== undefined) currentMerge.end = endTime;
+          if (currentMerge.endDate !== undefined) currentMerge.endDate = endTime;
+          if (currentMerge.end_time !== undefined) currentMerge.end_time = endTime;
+          if (currentMerge.endTime !== undefined) currentMerge.endTime = endTime;
+          if (currentMerge.dtend !== undefined) currentMerge.dtend = endTime;
+          if (currentMerge.end_date !== undefined) currentMerge.end_date = endTime;
+          if (currentMerge.dateEnd !== undefined) currentMerge.dateEnd = endTime;
+          if (currentMerge.date_end !== undefined) currentMerge.date_end = endTime;
+          if (!currentMerge.end && !currentMerge.endDate && !currentMerge.end_time && 
+              !currentMerge.endTime && !currentMerge.dtend && !currentMerge.end_date &&
+              !currentMerge.dateEnd && !currentMerge.date_end) {
+            currentMerge.end = endTime;
+          }
+        } else {
+          // Not consecutive, save current merge and start new one
+          mergedEvents.push(currentMerge);
+          currentMerge = { ...event };
+        }
+      }
+    }
+    
+    // Add the last merge group if any
+    if (currentMerge !== null) {
+      mergedEvents.push(currentMerge);
+    }
+  }
+  
+  return mergedEvents;
+}
+
+/**
+ * Process calendar events JSON and merge consecutive events
+ */
+function processCalendarEventsJson(jsonData) {
+  if (Array.isArray(jsonData)) {
+    // Format: [{event1}, {event2}, ...]
+    return mergeConsecutiveEvents(jsonData);
+  } else if (jsonData && typeof jsonData === 'object') {
+    // Check for nested structures
+    if (Array.isArray(jsonData.events)) {
+      // Format: {events: [...], ...}
+      return {
+        ...jsonData,
+        events: mergeConsecutiveEvents(jsonData.events)
+      };
+    } else if (Array.isArray(jsonData.calendars)) {
+      // Format: {calendars: [{events: [...]}, ...], ...}
+      return {
+        ...jsonData,
+        calendars: jsonData.calendars.map(calendar => {
+          if (Array.isArray(calendar.events)) {
+            return {
+              ...calendar,
+              events: mergeConsecutiveEvents(calendar.events)
+            };
+          }
+          return calendar;
+        })
+      };
+    } else if (Array.isArray(jsonData.data)) {
+      // Format: {data: [...], ...}
+      return {
+        ...jsonData,
+        data: mergeConsecutiveEvents(jsonData.data)
+      };
+    } else if (Array.isArray(jsonData.items)) {
+      // Format: {items: [...], ...}
+      return {
+        ...jsonData,
+        items: mergeConsecutiveEvents(jsonData.items)
+      };
+    }
+    // Unknown structure, try to find any array of events
+    for (const key in jsonData) {
+      if (Array.isArray(jsonData[key]) && jsonData[key].length > 0) {
+        // Check if it looks like events (has time fields)
+        const firstItem = jsonData[key][0];
+        if (firstItem && typeof firstItem === 'object') {
+          const hasTimeField = getEventTime(firstItem, 'start') !== null || 
+                              getEventTime(firstItem, 'end') !== null;
+          if (hasTimeField) {
+            return {
+              ...jsonData,
+              [key]: mergeConsecutiveEvents(jsonData[key])
+            };
+          }
+        }
+      }
+    }
+  }
+  
+  // Unknown format, return as-is
+  return jsonData;
+}
+
+/**
  * Sanitize response body to hide calendar URLs in error messages
  * Only sanitizes HTML and JSON responses to avoid breaking JavaScript code
  */
-async function sanitizeResponse(response) {
+async function sanitizeResponse(response, pathname) {
   const contentType = response.headers.get('content-type') || '';
   
   // Only sanitize HTML and JSON responses (error messages)
@@ -249,6 +507,27 @@ async function sanitizeResponse(response) {
   const body = await response.text();
   
   let sanitizedBody = body;
+  
+  // For JSON responses, check if it's a calendar events endpoint
+  if (contentType.includes('application/json')) {
+    // Check for calendar events endpoints - open-web-calendar uses /calendar.json
+    // Also check for any .json file that might contain calendar events
+    const isCalendarEventsEndpoint = pathname === '/calendar.events.json' ||
+                                     pathname === '/calendar.json' ||
+                                     pathname.endsWith('.events.json') ||
+                                     pathname.endsWith('.json');
+    
+    if (isCalendarEventsEndpoint) {
+      try {
+        const jsonData = JSON.parse(body);
+        const processedData = processCalendarEventsJson(jsonData);
+        sanitizedBody = JSON.stringify(processedData);
+      } catch (error) {
+        // If JSON parsing fails, continue with original body
+        console.error('Failed to parse calendar events JSON:', error);
+      }
+    }
+  }
   
   // For HTML responses, inject console filtering
   if (contentType.includes('text/html')) {
@@ -390,7 +669,8 @@ export default {
         });
         
         // Sanitize response to hide calendar URLs in error messages
-        return await sanitizeResponse(response);
+        // Pass pathname for calendar events processing
+        return await sanitizeResponse(response, pathname);
       }
       
       // Handle main calendar page requests - always add calendar URLs from secret
@@ -444,7 +724,8 @@ export default {
         });
         
         // Sanitize response to hide calendar URLs in error messages
-        return await sanitizeResponse(response);
+        // Pass pathname for calendar events processing
+        return await sanitizeResponse(response, pathname);
       }
       
       // For all other requests (static resources, etc.), proxy directly
@@ -469,7 +750,8 @@ export default {
       });
       
       // Sanitize response to hide calendar URLs in error messages
-      return await sanitizeResponse(response);
+      // Pass pathname for calendar events processing
+      return await sanitizeResponse(response, pathname);
     } catch (error) {
       return new Response(`Error: ${error.message}`, { 
         status: 500,
