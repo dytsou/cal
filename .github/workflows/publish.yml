@@ -37,11 +37,18 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Current package version: $VERSION"
 
+      - name: Get package name
+        id: package-name
+        run: |
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          echo "name=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+          echo "Current package name: $PACKAGE_NAME"
+
       - name: Check if version exists on npmjs
         id: check-npmjs
         run: |
           VERSION=${{ steps.package-version.outputs.version }}
-          if npm view ${{ vars.PACKAGE_NAME }}@$VERSION version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+          if npm view ${{ steps.package-name.outputs.name }}@$VERSION version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
             echo "exists=true" >> $GITHUB_OUTPUT
             echo "Version $VERSION already exists on npmjs, will skip npmjs publish"
           else
@@ -56,7 +63,7 @@ jobs:
           VERSION=${{ steps.package-version.outputs.version }}
           npm config set @dytsou:registry https://npm.pkg.github.com
           npm config set //npm.pkg.github.com/:_authToken ${{ secrets.GITHUB_TOKEN }}
-          if npm view ${{ vars.PACKAGE_NAME }}@$VERSION version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+          if npm view ${{ steps.package-name.outputs.name }}@$VERSION version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
             echo "exists=true" >> $GITHUB_OUTPUT
             echo "Version $VERSION already exists on GitHub Packages, will skip GitHub Packages publish"
           else
@@ -78,7 +85,7 @@ jobs:
           npm config set registry https://registry.npmjs.org
           npm config set //registry.npmjs.org/:_authToken ${{ secrets.NPM_TOKEN }}
           npm publish --access public || {
-            if npm view ${{ vars.PACKAGE_NAME }}@${{ steps.package-version.outputs.version }} version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+            if npm view ${{ steps.package-name.outputs.name }}@${{ steps.package-version.outputs.version }} version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
               echo "Version already exists, skipping publish"
               exit 0
             else
@@ -99,7 +106,7 @@ jobs:
           npm config set @dytsou:registry https://npm.pkg.github.com
           npm config set //npm.pkg.github.com/:_authToken ${{ secrets.GITHUB_TOKEN }}
           npm publish || {
-            if npm view ${{ vars.PACKAGE_NAME }}@${{ steps.package-version.outputs.version }} version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+            if npm view ${{ steps.package-name.outputs.name }}@${{ steps.package-version.outputs.version }} version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
               echo "Version already exists, skipping publish"
               exit 0
             else
@@ -152,11 +159,11 @@ jobs:
           name: v${{ steps.package-version.outputs.version }}
           prerelease: ${{ contains(steps.package-version.outputs.version, 'beta') || contains(steps.package-version.outputs.version, 'alpha') || contains(steps.package-version.outputs.version, 'rc') }}
           body: |
-            ## ${{ vars.PACKAGE_NAME }}@${{ steps.package-version.outputs.version }}
+            ## ${{ steps.package-name.outputs.name }}@${{ steps.package-version.outputs.version }}
 
             **Published to multiple registries:**
 
-            - **npmjs.com**: https://www.npmjs.com/package/${{ vars.PACKAGE_NAME }}
+            - **npmjs.com**: https://www.npmjs.com/package/${{ steps.package-name.outputs.name }}
             - **GitHub Packages**: https://github.com/dytsou/cal/packages
 
             *Note: If a registry already had this version, it was skipped. Only missing registries were published.*
@@ -165,9 +172,9 @@ jobs:
 
             **From npmjs (default):**
             ```bash
-            npm install -g ${{ vars.PACKAGE_NAME }}
+            npm install -g ${{ steps.package-name.outputs.name }}
             # or
-            pnpm install -g ${{ vars.PACKAGE_NAME }}
+            pnpm install -g ${{ steps.package-name.outputs.name }}
             ```
 
             **From GitHub Packages:**
@@ -180,9 +187,9 @@ jobs:
 
             Then install:
             ```bash
-            npm install -g ${{ vars.PACKAGE_NAME }}
+            npm install -g ${{ steps.package-name.outputs.name }}
             # or
-            pnpm install -g ${{ vars.PACKAGE_NAME }}
+            pnpm install -g ${{ steps.package-name.outputs.name }}
             ```
 
             ### Usage
