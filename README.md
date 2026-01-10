@@ -30,6 +30,7 @@ wrangler secret put ENCRYPTION_KEY
 ```
 
 **Getting Google Calendar iCal URLs:**
+
 - Go to your Google Calendar settings
 - Find the calendar you want to share
 - Click "Integrate calendar" or "Get shareable link"
@@ -193,12 +194,15 @@ This project uses a Cloudflare Worker to manage calendar URLs securely. Calendar
 ### Setup Instructions
 
 1. **Copy wrangler.toml.example to wrangler.toml:**
+
    ```bash
    cp wrangler.toml.example wrangler.toml
    ```
+
    Then edit `wrangler.toml` and customize it for your environment (e.g., add custom domain routes).
 
 2. **Install Wrangler CLI:**
+
    ```bash
    npm install -g wrangler
    # or
@@ -206,46 +210,55 @@ This project uses a Cloudflare Worker to manage calendar URLs securely. Calendar
    ```
 
 3. **Login to Cloudflare:**
+
    ```bash
    wrangler login
    ```
 
 4. **Set Calendar URLs Secret:**
+
    ```bash
    wrangler secret put CALENDAR_URL
    ```
+
    When prompted, enter your calendar URLs (comma-separated):
+
    ```
    https://calendar.google.com/calendar/ical/example%40gmail.com/public/basic.ics,https://calendar.google.com/calendar/ical/another%40gmail.com/public/basic.ics
    ```
-   
+
    **Note:** URLs can be plain or `fernet://` encrypted. If using encrypted URLs, you'll also need to set `ENCRYPTION_KEY`.
 
 5. **Set Encryption Key Secret (if using fernet:// encrypted URLs):**
+
    ```bash
    wrangler secret put ENCRYPTION_KEY
    ```
+
    When prompted, enter your Fernet encryption key (base64url-encoded 32-byte key).
-   
+
    Generate one with:
+
    ```bash
    node -e "console.log(require('crypto').randomBytes(32).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, ''))"
    ```
 
 6. **Deploy the Worker:**
+
    ```bash
    wrangler deploy
    ```
 
-6. **Update your .env file:**
+7. **Update your .env file:**
    After deployment, update the `WORKER_URL` in your `.env` file with your worker URL:
+
    ```
    WORKER_URL=https://your-worker.your-subdomain.workers.dev
    # or if using custom domain:
    WORKER_URL=https://your-domain.com
    ```
 
-7. **Rebuild your project:**
+8. **Rebuild your project:**
    ```bash
    pnpm run build
    ```
