@@ -26,7 +26,7 @@ if (needsWorkerUrl || hasPlaceholders) {
     console.error('Error: .env file not found (required for placeholders)');
     process.exit(1);
   }
-  
+
   if (fs.existsSync(envPath)) {
     const envContent = fs.readFileSync(envPath, 'utf-8');
     const envLines = envContent.split('\n');
@@ -58,7 +58,6 @@ if (needsWorkerUrl || hasPlaceholders) {
 }
 
 if (hasPlaceholders) {
-
   // Replace CALENDAR_SOURCES placeholder
   if (html.includes('{{CALENDAR_SOURCES}}')) {
     if (calendarSources.length === 0) {
@@ -119,7 +118,7 @@ if (hasPlaceholders) {
         console.log(
           `✓ Replaced {{CALENDAR_URLS}} with ${encryptedUrls.length} Fernet-encrypted calendar URL(s)`
         );
-        
+
         // Output encrypted URLs for copying to .env
         console.log('\n📋 Encrypted URLs (for .env file):');
         console.log('CALENDAR_URL_ENCRYPTED=' + encryptedUrls.join(','));
@@ -137,17 +136,20 @@ if (hasPlaceholders) {
         '[\n' + calendarUrls.map(url => `            "${url}"`).join(',\n') + '\n        ]';
       html = html.replace('{{ENCRYPTION_METHOD}}', 'none');
       html = html.replace('{{ENCRYPTION_KEY}}', '');
-      html = html.replace('{{WORKER_URL}}', 'https://open-web-calendar.hosted.quelltext.eu/calendar.html');
+      html = html.replace(
+        '{{WORKER_URL}}',
+        'https://open-web-calendar.hosted.quelltext.eu/calendar.html'
+      );
       console.log(
         `✓ Replaced {{CALENDAR_URLS}} with ${calendarUrls.length} calendar URL(s) (no encryption)`
       );
     }
 
     html = html.replace('{{CALENDAR_URLS}}', calendarUrlsArrayCode);
-    
+
     // Remove encryption key placeholder (not needed with Worker)
     html = html.replace('{{ENCRYPTION_KEY}}', '');
-    
+
     // Clean up fernet-bundle.js if it exists (no longer needed with Worker)
     const bundleFile = path.join(__dirname, '..', 'fernet-bundle.js');
     if (fs.existsSync(bundleFile)) {
@@ -159,7 +161,8 @@ if (hasPlaceholders) {
 
 // Always replace WORKER_URL placeholder if it exists (regardless of other placeholders)
 if (html.includes('{{WORKER_URL}}')) {
-  const finalWorkerUrl = workerUrl || process.env.WORKER_URL || 'https://open-web-calendar.hosted.quelltext.eu';
+  const finalWorkerUrl =
+    workerUrl || process.env.WORKER_URL || 'https://open-web-calendar.hosted.quelltext.eu';
   html = html.replace('{{WORKER_URL}}', finalWorkerUrl);
   if (finalWorkerUrl !== 'https://open-web-calendar.hosted.quelltext.eu') {
     console.log(`✓ Using Cloudflare Worker: ${finalWorkerUrl}`);

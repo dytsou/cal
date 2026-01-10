@@ -73,4 +73,3 @@ try {
   console.error('Error encrypting URLs:', error.message);
   process.exit(1);
 }
-

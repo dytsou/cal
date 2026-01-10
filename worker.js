@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker to decrypt fernet:// URLs and proxy to open-web-calendar
- * 
+ *
  * This worker:
  * 1. Reads CALENDAR_URL from Cloudflare Worker secrets (comma-separated)
  * 2. Decrypts fernet:// URLs using Fernet encryption (ENCRYPTION_METHOD is hardcoded to 'fernet')
@@ -8,13 +8,13 @@
  * 4. Filters out events declined by user (based on USER_EMAILS secret)
  * 5. Sanitizes non-PUBLIC events to only show busy time
  * 6. Returns the calendar HTML
- * 
+ *
  * Configuration:
  * - ENCRYPTION_METHOD: Hardcoded to 'fernet' (not configurable)
  * - ENCRYPTION_KEY: Required Cloudflare Worker secret (for decrypting fernet:// URLs)
  * - CALENDAR_URL: Required Cloudflare Worker secret (comma-separated, can be plain or fernet:// encrypted)
  * - USER_EMAILS: Optional Cloudflare Worker secret (comma-separated list of user emails for declined event filtering)
- * 
+ *
  * Usage:
  * 1. Set CALENDAR_URL secret: wrangler secret put CALENDAR_URL
  * 2. Set ENCRYPTION_KEY secret: wrangler secret put ENCRYPTION_KEY
@@ -53,22 +53,23 @@ async function decryptFernetToken(token, secretKey) {
   try {
     // Decode the token
     const tokenBytes = base64UrlDecode(token);
-    
-    if (tokenBytes.length < 57) { // Minimum: 1 + 8 + 16 + 0 + 32 = 57 bytes
+
+    if (tokenBytes.length < 57) {
+      // Minimum: 1 + 8 + 16 + 0 + 32 = 57 bytes
       throw new Error('Invalid Fernet token: too short');
     }
-    
+
     // Extract components
     const version = tokenBytes[0];
     if (version !== 0x80) {
       throw new Error('Invalid Fernet token: unsupported version');
     }
-    
+
     const timestamp = tokenBytes.slice(1, 9);
     const iv = tokenBytes.slice(9, 25);
     const hmac = tokenBytes.slice(-32);
     const ciphertext = tokenBytes.slice(25, -32);
-    
+
     // Derive signing key and encryption key from secret
     // Fernet secret is base64url-encoded 32-byte key
     // The library splits it directly: first 16 bytes = signing key, last 16 bytes = encryption key
@@ -82,13 +83,13 @@ async function decryptFernetToken(token, secretKey) {
     } catch (error) {
       throw new Error(`Failed to decode secret key: ${error.message}`);
     }
-    
+
     // Fernet splits the 32-byte secret directly:
     // Signing key: first 16 bytes (128 bits)
     // Encryption key: last 16 bytes (128 bits)
     const signingKey = secretBytes.slice(0, 16);
     const encryptionKey = secretBytes.slice(16, 32);
-    
+
     // Verify HMAC
     // HMAC message is: version (1 byte) + timestamp (8 bytes) + IV (16 bytes) + ciphertext
     const message = tokenBytes.slice(0, -32);
@@ -99,10 +100,10 @@ async function decryptFernetToken(token, secretKey) {
       false,
       ['sign', 'verify']
     );
-    
+
     const computedHmac = await crypto.subtle.sign('HMAC', hmacKey, message);
     const computedHmacBytes = new Uint8Array(computedHmac);
-    
+
     // Constant-time comparison
     let hmacValid = true;
     if (computedHmacBytes.length !== hmac.length) {
@@ -114,11 +115,11 @@ async function decryptFernetToken(token, secretKey) {
         }
       }
     }
-    
+
     if (!hmacValid) {
       throw new Error('Invalid Fernet token: HMAC verification failed');
     }
-    
+
     // Decrypt using AES-128-CBC
     const cryptoKey = await crypto.subtle.importKey(
       'raw',
@@ -127,13 +128,13 @@ async function decryptFernetToken(token, secretKey) {
       false,
       ['decrypt']
     );
-    
+
     const decrypted = await crypto.subtle.decrypt(
       { name: 'AES-CBC', iv: iv },
       cryptoKey,
       ciphertext
     );
-    
+
     // Decode the decrypted message (PKCS7 padding will be removed automatically)
     const decoder = new TextDecoder();
     return decoder.decode(decrypted);
@@ -147,10 +148,8 @@ async function decryptFernetToken(token, secretKey) {
  */
 async function decryptFernetUrl(fernetUrl, secretKey) {
   // Remove fernet:// prefix
-  const token = fernetUrl.startsWith('fernet://') 
-    ? fernetUrl.substring(9) 
-    : fernetUrl;
-  
+  const token = fernetUrl.startsWith('fernet://') ? fernetUrl.substring(9) : fernetUrl;
+
   return await decryptFernetToken(token, secretKey);
 }
 
@@ -215,7 +214,7 @@ function injectConsoleFilter(html) {
   };
 })();
 </script>`;
-  
+
   // Inject the script right after <head> or at the beginning of <body>
   if (html.includes('</head>')) {
     return html.replace('</head>', consoleFilterScript + '</head>');
@@ -225,7 +224,7 @@ function injectConsoleFilter(html) {
       return html.replace(bodyMatch[0], bodyMatch[0] + consoleFilterScript);
     }
   }
-  
+
   // Fallback: inject at the very beginning
   return consoleFilterScript + html;
 }
@@ -254,10 +253,19 @@ function normalizeDate(dateValue) {
 function getEventTime(event, field) {
   // Try common field name variations (including iCal and calendar.js formats)
   const variations = {
-    start: ['start', 'startDate', 'start_time', 'startTime', 'dtstart', 'start_date', 'dateStart', 'date_start'],
-    end: ['end', 'endDate', 'end_time', 'endTime', 'dtend', 'end_date', 'dateEnd', 'date_end']
+    start: [
+      'start',
+      'startDate',
+      'start_time',
+      'startTime',
+      'dtstart',
+      'start_date',
+      'dateStart',
+      'date_start',
+    ],
+    end: ['end', 'endDate', 'end_time', 'endTime', 'dtend', 'end_date', 'dateEnd', 'date_end'],
   };
-  
+
   const fieldNames = variations[field] || [field];
   for (const name of fieldNames) {
     if (event[name] !== undefined && event[name] !== null) {
@@ -295,22 +303,19 @@ function getCalendarId(event) {
 function getEventClass(event) {
   // Check various possible field names for CLASS property
   // iCal format uses CLASS, but different parsers may use different field names
-  let classValue = event.class || 
-                   event.CLASS || 
-                   event.classification || 
-                   event['CLASS'] ||
-                   event['class'] ||
-                   null;
-  
+  let classValue =
+    event.class || event.CLASS || event.classification || event['CLASS'] || event['class'] || null;
+
   // Check nested properties structure (common in some iCal parsers)
   if (!classValue && event.properties) {
-    classValue = event.properties.CLASS || 
-                 event.properties.class || 
-                 event.properties.CLASS?.value ||
-                 event.properties.class?.value ||
-                 null;
+    classValue =
+      event.properties.CLASS ||
+      event.properties.class ||
+      event.properties.CLASS?.value ||
+      event.properties.class?.value ||
+      null;
   }
-  
+
   // Check inside 'ical' field - open-web-calendar stores raw iCal data here
   if (!classValue && event.ical) {
     // ical might be a string containing raw iCal data or an object
@@ -324,12 +329,12 @@ function getEventClass(event) {
       classValue = event.ical.CLASS || event.ical.class || null;
     }
   }
-  
+
   // If no CLASS property found, return null (will be treated as PRIVATE by default)
   if (classValue === null || classValue === undefined || classValue === '') {
     return null;
   }
-  
+
   // Normalize to uppercase string for comparison
   return String(classValue).toUpperCase();
 }
@@ -357,7 +362,7 @@ function removeAllEventInfo(event) {
   event.title = '';
   event.summary = '';
   event.name = '';
-  event.text = 'BUSY';  // open-web-calendar uses 'text' field for title
+  event.text = 'BUSY'; // open-web-calendar uses 'text' field for title
   event.description = '';
   event.desc = '';
   event.location = '';
@@ -367,31 +372,31 @@ function removeAllEventInfo(event) {
   event.organizer = '';
   event.attendees = '';
   event.attendee = '';
-  event.participants = '';  // open-web-calendar uses 'participants'
+  event.participants = ''; // open-web-calendar uses 'participants'
   event.label = '';
   event.notes = '';
   event.note = '';
   event.comment = '';
   event.comments = '';
-  
+
   // CRITICAL: Remove ical field which contains raw iCal data with all event details
   // This prevents any sensitive information from being exposed in the response
   event.ical = '';
-  
+
   // Remove other fields that might contain identifying information
-  event.uid = '';  // Remove unique identifier
-  event.id = '';  // Remove ID if present
-  event.categories = '';  // Remove categories
-  event.color = '';  // Remove color
-  event.css_classes = '';  // Remove CSS classes
-  event.owc = '';  // Remove open-web-calendar specific data
-  event.recurrence = '';  // Remove recurrence info
-  event.sequence = '';  // Remove sequence
-  event.type = '';  // Remove type
-  
+  event.uid = ''; // Remove unique identifier
+  event.id = ''; // Remove ID if present
+  event.categories = ''; // Remove categories
+  event.color = ''; // Remove color
+  event.css_classes = ''; // Remove CSS classes
+  event.owc = ''; // Remove open-web-calendar specific data
+  event.recurrence = ''; // Remove recurrence info
+  event.sequence = ''; // Remove sequence
+  event.type = ''; // Remove type
+
   // Mark this event as sanitized
   event._isNonPublic = true;
-  
+
   return event;
 }
 
@@ -402,23 +407,23 @@ function removeAllEventInfo(event) {
 function sanitizeNonPublicEvent(event) {
   const eventClass = getEventClass(event);
   const isPublic = isPublicEvent(event);
-  
+
   // If CLASS is PUBLIC, return event as-is (no sanitization)
   if (isPublic) {
     return event;
   }
-  
+
   // For non-PUBLIC events (PRIVATE, CONFIDENTIAL, missing CLASS, or any other value), sanitize
   // Create a sanitized version with only time fields
   // Start with a copy of the event to preserve structure
   const sanitized = { ...event };
-  
+
   // Remove ALL identifying information - only keep time fields
   removeAllEventInfo(sanitized);
-  
+
   // Only preserve time fields, calendar ID, and CLASS property
   // All other fields have been removed to prevent information leakage
-  
+
   return sanitized;
 }
 
@@ -440,13 +445,13 @@ function parseUserEmails(userEmailsSecret) {
 /**
  * Check if event is declined by the calendar owner (user responded "no")
  * Returns true ONLY if the event is explicitly marked as declined by the calendar owner
- * 
+ *
  * For calendar invitations:
  * - When YOU decline an event, the event STATUS is still CONFIRMED
  * - But YOUR PARTSTAT (participation status) becomes DECLINED
  * - We need to check for PARTSTAT=DECLINED in YOUR ATTENDEE line specifically
  * - Other attendees declining should NOT filter the event
- * 
+ *
  * @param {Object} event - The event object to check
  * @param {string[]} userEmails - Array of user email addresses to check for declined status
  */
@@ -455,7 +460,7 @@ function isEventDeclined(event, userEmails = []) {
   const cssClasses = event['css-classes'] || event.css_classes || event.cssClasses || [];
   const eventType = event.type || '';
   const ical = event.ical || '';
-  
+
   // Check css-classes for declined indicator
   // open-web-calendar uses an array of classes like:
   // ['event', 'STATUS-CONFIRMED', 'CLASS-PUBLIC', etc.]
@@ -464,14 +469,13 @@ function isEventDeclined(event, userEmails = []) {
     for (const cls of cssClasses) {
       const lowerCls = String(cls).toLowerCase();
       // Only match exact status classes, not just containing 'declined'
-      if (lowerCls === 'status-declined' || 
-          lowerCls === 'partstat-declined') {
+      if (lowerCls === 'status-declined' || lowerCls === 'partstat-declined') {
         console.log('[Declined Check] FILTERED - css-class declined:', title);
         return true;
       }
     }
   }
-  
+
   // Check the event's own type/status field
   if (eventType) {
     const upperType = String(eventType).toUpperCase();
@@ -480,7 +484,7 @@ function isEventDeclined(event, userEmails = []) {
       return true;
     }
   }
-  
+
   // Check ical field for the USER's PARTSTAT=DECLINED
   if (ical && typeof ical === 'string') {
     // Check for STATUS:CANCELLED or STATUS:DECLINED (entire event cancelled)
@@ -489,15 +493,15 @@ function isEventDeclined(event, userEmails = []) {
       console.log('[Declined Check] FILTERED - event STATUS cancelled:', title);
       return true;
     }
-    
+
     // Check for PARTSTAT=DECLINED in the user's ATTENDEE line
     // Format: ATTENDEE;...;PARTSTAT=DECLINED;...:mailto:user@email.com
     // We need to find ATTENDEE lines that contain both PARTSTAT=DECLINED AND a user email
-    
+
     // Split ical into lines and look for ATTENDEE lines
     // Note: ATTENDEE lines can be folded (continuation lines start with space)
     const icalLines = ical.replace(/\r\n /g, '').split(/\r?\n/);
-    
+
     for (const line of icalLines) {
       if (line.startsWith('ATTENDEE')) {
         // Check if this attendee line has PARTSTAT=DECLINED
@@ -505,7 +509,12 @@ function isEventDeclined(event, userEmails = []) {
           // Check if this is for one of the user's emails
           for (const userEmail of userEmails) {
             if (line.toLowerCase().includes(userEmail.toLowerCase())) {
-              console.log('[Declined Check] FILTERED - user PARTSTAT=DECLINED:', title, '| email:', userEmail);
+              console.log(
+                '[Declined Check] FILTERED - user PARTSTAT=DECLINED:',
+                title,
+                '| email:',
+                userEmail
+              );
               return true;
             }
           }
@@ -513,7 +522,7 @@ function isEventDeclined(event, userEmails = []) {
       }
     }
   }
-  
+
   // Check if event has explicit status field indicating declined/cancelled
   const eventStatus = event.event_status || event.status || null;
   if (eventStatus) {
@@ -523,7 +532,7 @@ function isEventDeclined(event, userEmails = []) {
       return true;
     }
   }
-  
+
   return false;
 }
 
@@ -536,13 +545,13 @@ function filterDeclinedEvents(events, userEmails = []) {
   if (!Array.isArray(events) || events.length === 0) {
     return events;
   }
-  
+
   console.log('[Filter Declined] Processing', events.length, 'events');
-  
+
   const filteredEvents = events.filter(event => !isEventDeclined(event, userEmails));
-  
+
   console.log('[Filter Declined] After filtering:', filteredEvents.length, 'events remain');
-  
+
   return filteredEvents;
 }
 
@@ -556,13 +565,13 @@ function mergeConsecutiveEvents(events, userEmails = []) {
   if (!Array.isArray(events) || events.length === 0) {
     return events;
   }
-  
+
   // Filter out declined events first
   const filteredEvents = filterDeclinedEvents(events, userEmails);
-  
+
   // Sanitize non-PUBLIC events
   const sanitizedEvents = filteredEvents.map(event => sanitizeNonPublicEvent(event));
-  
+
   // Group events by calendar identifier
   const eventsByCalendar = {};
   for (const event of sanitizedEvents) {
@@ -572,13 +581,13 @@ function mergeConsecutiveEvents(events, userEmails = []) {
     }
     eventsByCalendar[calendarId].push(event);
   }
-  
+
   const mergedEvents = [];
-  
+
   // Process each calendar group separately
   for (const calendarId in eventsByCalendar) {
     const calendarEvents = eventsByCalendar[calendarId];
-    
+
     // Sort events by start time
     calendarEvents.sort((a, b) => {
       const startA = getEventTime(a, 'start');
@@ -586,16 +595,16 @@ function mergeConsecutiveEvents(events, userEmails = []) {
       if (!startA || !startB) return 0;
       return new Date(startA) - new Date(startB);
     });
-    
+
     // Merge consecutive events
     let currentMerge = null;
-    
+
     for (let i = 0; i < calendarEvents.length; i++) {
       const event = calendarEvents[i];
       // Event is already sanitized, but we need to preserve it during merge
       const startTime = getEventTime(event, 'start');
       const endTime = getEventTime(event, 'end');
-      
+
       if (!startTime || !endTime) {
         // If event is missing time info, add as-is
         if (currentMerge) {
@@ -605,7 +614,7 @@ function mergeConsecutiveEvents(events, userEmails = []) {
         mergedEvents.push(event);
         continue;
       }
-      
+
       if (currentMerge === null) {
         // Start a new merge group
         currentMerge = { ...event };
@@ -615,12 +624,12 @@ function mergeConsecutiveEvents(events, userEmails = []) {
         // Normalize dates for comparison (handle different date formats)
         const normalizedEndTime = normalizeDate(currentEndTime);
         const normalizedStartTime = normalizeDate(startTime);
-        
+
         if (normalizedEndTime && normalizedStartTime && normalizedEndTime === normalizedStartTime) {
           // Check if either event is non-PUBLIC - if so, keep titles empty
           const currentIsNonPublic = currentMerge._isNonPublic || !isPublicEvent(currentMerge);
           const eventIsNonPublic = event._isNonPublic || !isPublicEvent(event);
-          
+
           if (currentIsNonPublic || eventIsNonPublic) {
             // At least one event is non-PUBLIC, remove ALL identifying information
             removeAllEventInfo(currentMerge);
@@ -628,10 +637,11 @@ function mergeConsecutiveEvents(events, userEmails = []) {
             // Both are PUBLIC, merge titles normally
             const currentTitle = getEventTitle(currentMerge);
             const eventTitle = getEventTitle(event);
-            const combinedTitle = currentTitle && eventTitle 
-              ? `${currentTitle} + ${eventTitle}`
-              : currentTitle || eventTitle;
-            
+            const combinedTitle =
+              currentTitle && eventTitle
+                ? `${currentTitle} + ${eventTitle}`
+                : currentTitle || eventTitle;
+
             // Update title field (try common variations)
             if (currentMerge.title !== undefined) currentMerge.title = combinedTitle;
             if (currentMerge.summary !== undefined) currentMerge.summary = combinedTitle;
@@ -639,15 +649,16 @@ function mergeConsecutiveEvents(events, userEmails = []) {
             if (!currentMerge.title && !currentMerge.summary && !currentMerge.name) {
               currentMerge.title = combinedTitle;
             }
-            
+
             // Combine descriptions
             const currentDesc = getEventDescription(currentMerge);
             const eventDesc = getEventDescription(event);
             if (currentDesc || eventDesc) {
-              const combinedDesc = currentDesc && eventDesc
-                ? `${currentDesc}\n\n${eventDesc}`
-                : currentDesc || eventDesc;
-              
+              const combinedDesc =
+                currentDesc && eventDesc
+                  ? `${currentDesc}\n\n${eventDesc}`
+                  : currentDesc || eventDesc;
+
               if (currentMerge.description !== undefined) currentMerge.description = combinedDesc;
               if (currentMerge.desc !== undefined) currentMerge.desc = combinedDesc;
               if (!currentMerge.description && !currentMerge.desc) {
@@ -655,19 +666,29 @@ function mergeConsecutiveEvents(events, userEmails = []) {
               }
             }
           }
-          
+
           // Update end time - preserve original field name format
-          const originalEndField = getEventTime(currentMerge, 'end') !== null 
-            ? (currentMerge.end !== undefined ? 'end' :
-               currentMerge.endDate !== undefined ? 'endDate' :
-               currentMerge.end_time !== undefined ? 'end_time' :
-               currentMerge.endTime !== undefined ? 'endTime' :
-               currentMerge.dtend !== undefined ? 'dtend' :
-               currentMerge.end_date !== undefined ? 'end_date' :
-               currentMerge.dateEnd !== undefined ? 'dateEnd' :
-               currentMerge.date_end !== undefined ? 'date_end' : 'end')
-            : 'end';
-          
+          const originalEndField =
+            getEventTime(currentMerge, 'end') !== null
+              ? currentMerge.end !== undefined
+                ? 'end'
+                : currentMerge.endDate !== undefined
+                  ? 'endDate'
+                  : currentMerge.end_time !== undefined
+                    ? 'end_time'
+                    : currentMerge.endTime !== undefined
+                      ? 'endTime'
+                      : currentMerge.dtend !== undefined
+                        ? 'dtend'
+                        : currentMerge.end_date !== undefined
+                          ? 'end_date'
+                          : currentMerge.dateEnd !== undefined
+                            ? 'dateEnd'
+                            : currentMerge.date_end !== undefined
+                              ? 'date_end'
+                              : 'end'
+              : 'end';
+
           // Update all possible end time fields to ensure compatibility
           if (currentMerge.end !== undefined) currentMerge.end = endTime;
           if (currentMerge.endDate !== undefined) currentMerge.endDate = endTime;
@@ -677,9 +698,16 @@ function mergeConsecutiveEvents(events, userEmails = []) {
           if (currentMerge.end_date !== undefined) currentMerge.end_date = endTime;
           if (currentMerge.dateEnd !== undefined) currentMerge.dateEnd = endTime;
           if (currentMerge.date_end !== undefined) currentMerge.date_end = endTime;
-          if (!currentMerge.end && !currentMerge.endDate && !currentMerge.end_time && 
-              !currentMerge.endTime && !currentMerge.dtend && !currentMerge.end_date &&
-              !currentMerge.dateEnd && !currentMerge.date_end) {
+          if (
+            !currentMerge.end &&
+            !currentMerge.endDate &&
+            !currentMerge.end_time &&
+            !currentMerge.endTime &&
+            !currentMerge.dtend &&
+            !currentMerge.end_date &&
+            !currentMerge.dateEnd &&
+            !currentMerge.date_end
+          ) {
             currentMerge.end = endTime;
           }
         } else {
@@ -689,13 +717,13 @@ function mergeConsecutiveEvents(events, userEmails = []) {
         }
       }
     }
-    
+
     // Add the last merge group if any
     if (currentMerge !== null) {
       mergedEvents.push(currentMerge);
     }
   }
-  
+
   return mergedEvents;
 }
 
@@ -707,13 +735,13 @@ function removeCalendarName(calendar) {
   if (!calendar || typeof calendar !== 'object') {
     return calendar;
   }
-  
+
   // Create a copy of the calendar object without the name field
   const sanitized = { ...calendar };
   delete sanitized.name;
   delete sanitized.calendarName;
   delete sanitized.title;
-  
+
   return sanitized;
 }
 
@@ -742,12 +770,12 @@ function processCalendarEventsJson(jsonData, userEmails = []) {
         }
       }
     }
-    
+
     // Debug logging removed - CLASS detection is working
   } catch (e) {
     // Ignore errors
   }
-  
+
   if (Array.isArray(jsonData)) {
     // Format: [{event1}, {event2}, ...]
     return mergeConsecutiveEvents(jsonData, userEmails);
@@ -759,41 +787,41 @@ function processCalendarEventsJson(jsonData, userEmails = []) {
       const sanitizedRoot = removeCalendarName(jsonData);
       return {
         ...sanitizedRoot,
-        events: mergeConsecutiveEvents(jsonData.events, userEmails)
+        events: mergeConsecutiveEvents(jsonData.events, userEmails),
       };
     } else if (Array.isArray(jsonData.calendars)) {
       // Format: {calendars: [{events: [...]}, ...], ...}
       // Remove calendar name from root level as well
       const sanitizedRoot = removeCalendarName(jsonData);
-      
+
       return {
         ...sanitizedRoot,
         calendars: jsonData.calendars.map(calendar => {
           // Remove calendar name from calendar object
           const sanitizedCalendar = removeCalendarName(calendar);
-          
+
           if (Array.isArray(sanitizedCalendar.events)) {
             return {
               ...sanitizedCalendar,
-              events: mergeConsecutiveEvents(sanitizedCalendar.events, userEmails)
+              events: mergeConsecutiveEvents(sanitizedCalendar.events, userEmails),
             };
           }
           return sanitizedCalendar;
-        })
+        }),
       };
     } else if (Array.isArray(jsonData.data)) {
       // Format: {data: [...], ...}
       const sanitizedRoot = removeCalendarName(jsonData);
       return {
         ...sanitizedRoot,
-        data: mergeConsecutiveEvents(jsonData.data, userEmails)
+        data: mergeConsecutiveEvents(jsonData.data, userEmails),
       };
     } else if (Array.isArray(jsonData.items)) {
       // Format: {items: [...], ...}
       const sanitizedRoot = removeCalendarName(jsonData);
       return {
         ...sanitizedRoot,
-        items: mergeConsecutiveEvents(jsonData.items, userEmails)
+        items: mergeConsecutiveEvents(jsonData.items, userEmails),
       };
     }
     // Unknown structure, try to find any array of events
@@ -802,20 +830,20 @@ function processCalendarEventsJson(jsonData, userEmails = []) {
         // Check if it looks like events (has time fields)
         const firstItem = jsonData[key][0];
         if (firstItem && typeof firstItem === 'object') {
-          const hasTimeField = getEventTime(firstItem, 'start') !== null || 
-                              getEventTime(firstItem, 'end') !== null;
+          const hasTimeField =
+            getEventTime(firstItem, 'start') !== null || getEventTime(firstItem, 'end') !== null;
           if (hasTimeField) {
             const sanitizedRoot = removeCalendarName(jsonData);
             return {
               ...sanitizedRoot,
-              [key]: mergeConsecutiveEvents(jsonData[key], userEmails)
+              [key]: mergeConsecutiveEvents(jsonData[key], userEmails),
             };
           }
         }
       }
     }
   }
-  
+
   // Unknown format, remove calendar name if present and return
   if (jsonData && typeof jsonData === 'object') {
     return removeCalendarName(jsonData);
@@ -832,26 +860,27 @@ function processCalendarEventsJson(jsonData, userEmails = []) {
  */
 async function sanitizeResponse(response, pathname, userEmails = []) {
   const contentType = response.headers.get('content-type') || '';
-  
+
   // Block ICS/calendar file downloads - check content type and pathname
-  if (contentType.includes('text/calendar') || 
-      contentType.includes('application/ics') ||
-      pathname.endsWith('.ics') || 
-      pathname.endsWith('.ICAL') || 
-      pathname.endsWith('.iCal')) {
-    return new Response('Calendar file download is not allowed', { 
+  if (
+    contentType.includes('text/calendar') ||
+    contentType.includes('application/ics') ||
+    pathname.endsWith('.ics') ||
+    pathname.endsWith('.ICAL') ||
+    pathname.endsWith('.iCal')
+  ) {
+    return new Response('Calendar file download is not allowed', {
       status: 403,
-      headers: { 
+      headers: {
         'Content-Type': 'text/plain',
-        'Access-Control-Allow-Origin': '*'
-      }
+        'Access-Control-Allow-Origin': '*',
+      },
     });
   }
-  
+
   // Only sanitize HTML and JSON responses (error messages)
   // Skip JavaScript files to avoid breaking code
-  if (!contentType.includes('text/html') && 
-      !contentType.includes('application/json')) {
+  if (!contentType.includes('text/html') && !contentType.includes('application/json')) {
     // For non-HTML/JSON responses (including JavaScript), just add CORS header and return
     const responseHeaders = new Headers(response.headers);
     responseHeaders.set('Access-Control-Allow-Origin', '*');
@@ -861,20 +890,21 @@ async function sanitizeResponse(response, pathname, userEmails = []) {
       headers: responseHeaders,
     });
   }
-  
+
   const body = await response.text();
-  
+
   let sanitizedBody = body;
-  
+
   // For JSON responses, check if it's a calendar events endpoint
   if (contentType.includes('application/json')) {
     // Check for calendar events endpoints - open-web-calendar uses /calendar.json
     // Also check for any .json file that might contain calendar events
-    const isCalendarEventsEndpoint = pathname === '/calendar.events.json' ||
-                                     pathname === '/calendar.json' ||
-                                     pathname.endsWith('.events.json') ||
-                                     pathname.endsWith('.json');
-    
+    const isCalendarEventsEndpoint =
+      pathname === '/calendar.events.json' ||
+      pathname === '/calendar.json' ||
+      pathname.endsWith('.events.json') ||
+      pathname.endsWith('.json');
+
     if (isCalendarEventsEndpoint) {
       try {
         const jsonData = JSON.parse(body);
@@ -886,12 +916,12 @@ async function sanitizeResponse(response, pathname, userEmails = []) {
       }
     }
   }
-  
+
   // For HTML responses, inject console filtering
   if (contentType.includes('text/html')) {
     sanitizedBody = injectConsoleFilter(sanitizedBody);
   }
-  
+
   // Patterns to detect and sanitize calendar URLs
   // Only match complete URLs, not code fragments
   const urlPatterns = [
@@ -900,14 +930,14 @@ async function sanitizeResponse(response, pathname, userEmails = []) {
     // Only match %40 when it's part of a URL (followed by domain-like pattern)
     /%40[a-zA-Z0-9._-]+\.[a-zA-Z]{2,}[^\s"']*/gi,
   ];
-  
+
   urlPatterns.forEach(pattern => {
     sanitizedBody = sanitizedBody.replace(pattern, '[Calendar URL hidden]');
   });
-  
+
   const responseHeaders = new Headers(response.headers);
   responseHeaders.set('Access-Control-Allow-Origin', '*');
-  
+
   return new Response(sanitizedBody, {
     status: response.status,
     statusText: response.statusText,
@@ -919,103 +949,105 @@ export default {
   async fetch(request, env) {
     try {
       const url = new URL(request.url);
-      
+
       // ENCRYPTION_METHOD is hardcoded to 'fernet'
       const ENCRYPTION_METHOD = 'fernet';
-      
+
       const encryptionKey = env.ENCRYPTION_KEY;
       const calendarUrlSecret = env.CALENDAR_URL; // Read from Cloudflare Worker secret
-      
+
       // Parse user emails from secret for declined event filtering
       // USER_EMAILS secret should be comma-separated list of emails
       const userEmails = parseUserEmails(env.USER_EMAILS);
-      
+
       if (!calendarUrlSecret) {
-        return new Response('CALENDAR_URL not configured in Cloudflare Worker secrets', { 
+        return new Response('CALENDAR_URL not configured in Cloudflare Worker secrets', {
           status: 500,
-          headers: { 'Content-Type': 'text/plain' }
+          headers: { 'Content-Type': 'text/plain' },
         });
       }
-      
+
       // Parse calendar URLs from secret (comma-separated, can be plain or fernet://)
       const calendarUrlsFromSecret = calendarUrlSecret
         .split(',')
         .map(s => s.trim())
         .filter(s => s);
-      
+
       // Use calendar URLs from secret (they may be fernet:// encrypted or plain)
       const calendarUrls = calendarUrlsFromSecret;
-      
+
       // Check if any of the URLs are fernet:// encrypted
       const hasFernetUrls = calendarUrls.some(url => url.startsWith('fernet://'));
-      
+
       // If we have fernet:// URLs, we need ENCRYPTION_KEY
       if (hasFernetUrls && !encryptionKey) {
-        return new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', { 
+        return new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', {
           status: 500,
-          headers: { 'Content-Type': 'text/plain' }
+          headers: { 'Content-Type': 'text/plain' },
         });
       }
-      
+
       // Get the pathname to determine request type
       const pathname = url.pathname;
-      
+
       // Block ICS file downloads - prevent access to raw calendar files
       if (pathname.endsWith('.ics') || pathname.endsWith('.ICAL') || pathname.endsWith('.iCal')) {
-        return new Response('Calendar file download is not allowed', { 
+        return new Response('Calendar file download is not allowed', {
           status: 403,
-          headers: { 
+          headers: {
             'Content-Type': 'text/plain',
-            'Access-Control-Allow-Origin': '*'
-          }
+            'Access-Control-Allow-Origin': '*',
+          },
         });
       }
-      
+
       // Check if this is the main calendar page request
-      const isMainCalendarPage = pathname === '/' || 
-                                  pathname === '/calendar.html' || 
-                                  pathname.endsWith('/calendar.html') ||
-                                  pathname === '';
-      
+      const isMainCalendarPage =
+        pathname === '/' ||
+        pathname === '/calendar.html' ||
+        pathname.endsWith('/calendar.html') ||
+        pathname === '';
+
       // Check if this is an API endpoint that needs calendar URLs
       // This includes /srcdoc, /calendar.events.json, /calendar.json, etc.
-      const isApiEndpoint = pathname === '/srcdoc' || 
-                            pathname.startsWith('/srcdoc') ||
-                            pathname === '/calendar.events.json' ||
-                            pathname === '/calendar.json' ||
-                            pathname.endsWith('.events.json') ||
-                            pathname.endsWith('.json');
-      
+      const isApiEndpoint =
+        pathname === '/srcdoc' ||
+        pathname.startsWith('/srcdoc') ||
+        pathname === '/calendar.events.json' ||
+        pathname === '/calendar.json' ||
+        pathname.endsWith('.events.json') ||
+        pathname.endsWith('.json');
+
       // For API endpoints like /srcdoc, always use calendar URLs from secret
       if (isApiEndpoint) {
         // Build the target URL
         const targetUrl = new URL(`https://open-web-calendar.hosted.quelltext.eu${pathname}`);
-        
+
         // Copy all query parameters except 'url'
         for (const [key, value] of url.searchParams.entries()) {
           if (key !== 'url') {
             targetUrl.searchParams.append(key, value);
           }
         }
-        
+
         // Decrypt and add calendar URLs from secret
         // ENCRYPTION_METHOD is hardcoded to 'fernet'
         const decryptedUrls = [];
         for (const urlParam of calendarUrls) {
           if (urlParam.startsWith('fernet://')) {
             if (!encryptionKey) {
-              return new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', { 
+              return new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', {
                 status: 500,
-                headers: { 'Content-Type': 'text/plain' }
+                headers: { 'Content-Type': 'text/plain' },
               });
             }
             try {
               const decrypted = await decryptFernetUrl(urlParam, encryptionKey);
               decryptedUrls.push(decrypted);
             } catch (error) {
-              return new Response(`Failed to decrypt calendar URL: ${error.message}`, { 
+              return new Response(`Failed to decrypt calendar URL: ${error.message}`, {
                 status: 500,
-                headers: { 'Content-Type': 'text/plain' }
+                headers: { 'Content-Type': 'text/plain' },
               });
             }
           } else {
@@ -1023,29 +1055,33 @@ export default {
             decryptedUrls.push(urlParam);
           }
         }
-        
+
         // Add decrypted URLs
         for (const decryptedUrl of decryptedUrls) {
           targetUrl.searchParams.append('url', decryptedUrl);
         }
-        
+
         // Forward all headers from the original request
         const requestHeaders = new Headers();
         request.headers.forEach((value, key) => {
-          if (key.toLowerCase() !== 'host' && key.toLowerCase() !== 'cf-ray' && key.toLowerCase() !== 'cf-connecting-ip') {
+          if (
+            key.toLowerCase() !== 'host' &&
+            key.toLowerCase() !== 'cf-ray' &&
+            key.toLowerCase() !== 'cf-connecting-ip'
+          ) {
             requestHeaders.set(key, value);
           }
         });
-        
+
         const response = await fetch(targetUrl.toString(), {
           headers: requestHeaders,
         });
-        
+
         // Sanitize response to hide calendar URLs in error messages
         // Pass pathname for calendar events processing and user emails for declined filtering
         return await sanitizeResponse(response, pathname, userEmails);
       }
-      
+
       // Handle main calendar page requests - always add calendar URLs from secret
       if (isMainCalendarPage) {
         // Decrypt calendar URLs from secret
@@ -1054,18 +1090,18 @@ export default {
         for (const urlParam of calendarUrls) {
           if (urlParam.startsWith('fernet://')) {
             if (!encryptionKey) {
-              return new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', { 
+              return new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', {
                 status: 500,
-                headers: { 'Content-Type': 'text/plain' }
+                headers: { 'Content-Type': 'text/plain' },
               });
             }
             try {
               const decrypted = await decryptFernetUrl(urlParam, encryptionKey);
               decryptedUrls.push(decrypted);
             } catch (error) {
-              return new Response(`Failed to decrypt calendar URL: ${error.message}`, { 
+              return new Response(`Failed to decrypt calendar URL: ${error.message}`, {
                 status: 500,
-                headers: { 'Content-Type': 'text/plain' }
+                headers: { 'Content-Type': 'text/plain' },
               });
             }
           } else {
@@ -1073,62 +1109,68 @@ export default {
             decryptedUrls.push(urlParam);
           }
         }
-        
+
         // Build the open-web-calendar URL with decrypted URLs
         const calendarUrl = new URL('https://open-web-calendar.hosted.quelltext.eu/calendar.html');
-        
+
         // Copy all query parameters except 'url' (calendar URLs come from secret)
         for (const [key, value] of url.searchParams.entries()) {
           if (key !== 'url') {
             calendarUrl.searchParams.append(key, value);
           }
         }
-        
+
         // Add decrypted URLs from secret
         for (const decryptedUrl of decryptedUrls) {
           calendarUrl.searchParams.append('url', decryptedUrl);
         }
-        
+
         // Fetch from open-web-calendar
         const response = await fetch(calendarUrl.toString(), {
           headers: {
             'User-Agent': request.headers.get('User-Agent') || 'Cloudflare-Worker',
           },
         });
-        
+
         // Sanitize response to hide calendar URLs in error messages
         // Pass pathname for calendar events processing
         return await sanitizeResponse(response, pathname, userEmails);
       }
-      
+
       // For all other requests (static resources, etc.), proxy directly
       let targetPath = pathname;
       if (pathname === '/' || pathname === '') {
         targetPath = '/calendar.html';
       }
-      
-      const targetUrl = new URL(`https://open-web-calendar.hosted.quelltext.eu${targetPath}${url.search}`);
-      
+
+      const targetUrl = new URL(
+        `https://open-web-calendar.hosted.quelltext.eu${targetPath}${url.search}`
+      );
+
       // Forward all headers from the original request
       const requestHeaders = new Headers();
       request.headers.forEach((value, key) => {
         // Skip certain headers that shouldn't be forwarded
-        if (key.toLowerCase() !== 'host' && key.toLowerCase() !== 'cf-ray' && key.toLowerCase() !== 'cf-connecting-ip') {
+        if (
+          key.toLowerCase() !== 'host' &&
+          key.toLowerCase() !== 'cf-ray' &&
+          key.toLowerCase() !== 'cf-connecting-ip'
+        ) {
           requestHeaders.set(key, value);
         }
       });
-      
+
       const response = await fetch(targetUrl.toString(), {
         headers: requestHeaders,
       });
-      
+
       // Sanitize response to hide calendar URLs in error messages
       // Pass pathname for calendar events processing
       return await sanitizeResponse(response, pathname, userEmails);
     } catch (error) {
-      return new Response(`Error: ${error.message}`, { 
+      return new Response(`Error: ${error.message}`, {
         status: 500,
-        headers: { 'Content-Type': 'text/plain' }
+        headers: { 'Content-Type': 'text/plain' },
       });
     }
   },
