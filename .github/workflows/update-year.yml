@@ -1,0 +1,59 @@
+name: Update Copyright Year
+
+on:
+  schedule:
+    - cron: "0 0 1 1 *"
+  workflow_dispatch:
+
+jobs:
+  update-year:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get current year
+        id: year
+        run: echo "year=$(date +%Y)" >> $GITHUB_OUTPUT
+
+      - name: Update LICENSE file
+        run: |
+          current_year=$(date +%Y)
+          sed -i "s/Copyright (c) [0-9]\{4\} dytsou/Copyright (c) $current_year dytsou/" LICENSE
+
+      - name: Update index.html footer (if exists)
+        run: |
+          if [ -f index.html ]; then
+            current_year=$(date +%Y)
+            # Update copyright in HTML comment (line 5)
+            sed -i "s/Copyright (c) [0-9]\{4\} dytsou/Copyright (c) $current_year dytsou/" index.html
+            # Update copyright in footer paragraph (line 60)
+            sed -i "s/Copyright (c) [0-9]\{4\} dytsou/Copyright (c) $current_year dytsou/" index.html
+          fi
+
+      - name: Check for changes
+        id: changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit and push changes
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add LICENSE
+          # Add index.html only if it exists and was modified
+          if [ -f index.html ] && [ -n "$(git status --porcelain index.html)" ]; then
+            git add index.html
+          fi
+          git commit -m "chore: update copyright year to $(date +%Y)"
+          git push
