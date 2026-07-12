@@ -26,15 +26,19 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Create .env file
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
         run: |
           {
-            [ -n "${{ secrets.WORKER_URL }}" ] && echo "WORKER_URL=${{ secrets.WORKER_URL }}" || echo "WORKER_URL="
+            [ -n "$WORKER_URL" ] && echo "WORKER_URL=$WORKER_URL" || echo "WORKER_URL="
           } > .env
 
       - name: Run build
         run: pnpm build
 
       - name: Verify build output
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
         run: |
           if [ ! -f dist/index.html ]; then
             echo "Error: dist/index.html was not generated"
@@ -48,8 +52,8 @@ jobs:
             echo "Error: {{WORKER_URL}} placeholder was not replaced"
             exit 1
           fi
-          if [ -n "${{ secrets.WORKER_URL }}" ]; then
-            if ! grep -qF "${{ secrets.WORKER_URL }}/calendar.html" dist/index.html; then
+          if [ -n "$WORKER_URL" ]; then
+            if ! grep -qF "$WORKER_URL/calendar.html" dist/index.html; then
               echo "Error: WORKER_URL secret is set but the built calendar iframe does not point to it."
               echo "       The build likely fell back to the open-web-calendar default, which bypasses"
               echo "       the proxy Worker and results in an empty calendar (no events)."

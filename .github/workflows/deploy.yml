@@ -31,9 +31,11 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Create .env file
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
         run: |
           {
-            [ -n "${{ secrets.WORKER_URL }}" ] && echo "WORKER_URL=${{ secrets.WORKER_URL }}" || echo "WORKER_URL="
+            [ -n "$WORKER_URL" ] && echo "WORKER_URL=$WORKER_URL" || echo "WORKER_URL="
           } > .env
 
       - name: Build
