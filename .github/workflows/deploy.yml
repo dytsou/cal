@@ -1,34 +1,31 @@
-name: Deploy to GitHub Pages
+name: Deploy to Cloudflare Pages
 
 on:
-  push:
-    branches:
-      - main
+  workflow_run:
+    workflows: [CI]
+    types:
+      - completed
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: 'pages'
-  cancel-in-progress: false
 
 jobs:
-  build:
+  checks:
+    if: github.event_name != 'workflow_run'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: '20'
+          node-version: 20
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -38,24 +35,66 @@ jobs:
           {
             [ -n "${{ secrets.WORKER_URL }}" ] && echo "WORKER_URL=${{ secrets.WORKER_URL }}" || echo "WORKER_URL="
           } > .env
-          echo "✓ Note: CALENDAR_URL is now managed via Cloudflare Worker secrets"
 
       - name: Build
-        run: |
-          node scripts/build.js
+        run: pnpm build
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v4
+      - name: Verify build output
+        run: test -f dist/index.html
 
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Upload build artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          path: '.'
+          name: dist
+          path: dist
+          retention-days: 1
+          if-no-files-found: error
 
   deploy:
+    needs: [checks]
+    if: |
+      always() &&
+      (
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+        (github.event_name == 'workflow_dispatch' && needs.checks.result == 'success')
+      )
     runs-on: ubuntu-latest
-    needs: build
+    permissions:
+      actions: read
+      contents: read
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
     steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Download build artifact from CI
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dist
+          path: dist
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Download build artifact from checks
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Verify build output
+        run: test -f dist/index.html
+
+      - name: Deploy Pages and register front-door route
+        uses: dytsou/cloudflare-subpath-deploy@842331aa01a5ca5ceaeb5286bf2bc37fe74c3bd1 # v0.1.2 (@v0)
+        with:
+          output-dir: dist
+          manifest-repo: dytsou/site
+          manifest-path: src/data/route-manifest.json
+          create-pr: "true"
+          deploy-worker: "false"
+          cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          cloudflare-account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          manifest-repo-token: ${{ secrets.MANIFEST_REPO_TOKEN }}

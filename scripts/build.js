@@ -179,9 +179,12 @@ if (html.includes('{{YEAR}}')) {
   html = html.replace(/\{\{YEAR\}\}/g, currentYear);
 }
 
-// Write built HTML
-const outputPath = path.join(__dirname, '..', 'index.html');
+// Write built HTML to dist/ (Cloudflare Pages deploy artifact)
+const distDir = path.join(__dirname, '..', 'dist');
+fs.mkdirSync(distDir, { recursive: true });
+const outputPath = path.join(distDir, 'index.html');
 fs.writeFileSync(outputPath, html, 'utf-8');
+console.log(`✓ Wrote ${outputPath}`);
 
 // Update LICENSE file with current year
 const licensePath = path.join(__dirname, '..', 'LICENSE');
