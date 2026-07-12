@@ -88,7 +88,7 @@ jobs:
         run: test -f dist/index.html
 
       - name: Deploy Pages and register front-door route
-        uses: dytsou/cloudflare-subpath-deploy@bfee811fd73cf280c9f999ab7090f8de4c752f20 # v0.1.5 (@v0)
+        uses: dytsou/cloudflare-subpath-deploy@aac9400925d0468c70eb4ebc8d2faedea010a4c0 # v0.1.6 (@v0)
         with:
           output-dir: dist
           manifest-repo: dytsou/site
