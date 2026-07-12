@@ -2,55 +2,67 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
-    branches: [main, master]
+    branches: [main]
 
 jobs:
   test:
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        node-version: [18, 20]
-
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - name: Setup Node.js v${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 20
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Create test .env file
-        run: |
-          echo "WORKER_URL=" > .env
-          echo "✓ Note: CALENDAR_URL is now managed via Cloudflare Worker secrets"
+        run: echo "WORKER_URL=" > .env
 
       - name: Run build
-        run: pnpm run build
+        run: pnpm build
 
       - name: Verify build output
         run: |
-          if [ ! -f index.html ]; then
-            echo "Error: index.html was not generated"
+          if [ ! -f dist/index.html ]; then
+            echo "Error: dist/index.html was not generated"
             exit 1
           fi
-          # Verify that calendar URLs are NOT in the HTML (they're in Cloudflare Worker secrets)
-          if grep -q "calendarUrls:" index.html; then
-            echo "Error: calendarUrls should not be in HTML (they're in Cloudflare Worker secrets)"
+          if grep -q "calendarUrls:" dist/index.html; then
+            echo "Error: calendarUrls should not be in HTML (managed via Worker secrets)"
             exit 1
           fi
-          # Verify WORKER_URL placeholder was replaced
-          if grep -q "{{WORKER_URL}}" index.html; then
+          if grep -q "{{WORKER_URL}}" dist/index.html; then
             echo "Error: {{WORKER_URL}} placeholder was not replaced"
             exit 1
           fi
-          echo "✓ Build verification passed - Calendar URLs are managed via Cloudflare Worker secrets"
+          echo "✓ Build verification passed"
+
+      - name: Verify deploy contract
+        run: |
+          node --input-type=module -e "
+            import { readFileSync, existsSync } from 'node:fs';
+            const c = JSON.parse(readFileSync('deploy-contract.json', 'utf8'));
+            if (c.ownerRepo !== 'dytsou/cal') throw new Error('ownerRepo');
+            if (c.outputDir !== 'dist') throw new Error('outputDir');
+            if (!existsSync('dist/index.html')) throw new Error('missing dist/index.html');
+            console.log('verify-deploy-contract: ok');
+          "
+
+      - name: Upload build artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dist
+          path: dist
+          retention-days: 1
+          if-no-files-found: error
