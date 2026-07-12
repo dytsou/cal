@@ -8,6 +8,7 @@ A simple calendar application that displays multiple calendar feeds using Open W
 - Dark theme with customizable styling
 - Full-height responsive design
 - URL parameters for view mode and date selection
+- Liquid-glass query panel (hover the top-right corner to reveal) for changing `mode` and `date` without editing the URL manually
 - Clean interface without menu buttons or navigation controls
 
 ## Setup
@@ -84,6 +85,8 @@ The calendar supports URL parameters for navigation:
 - **`?theme=light`** - Force light theme
 
 **Theme:** The calendar uses your browser's color scheme preference by default. You can override it using the `?theme=` URL parameter.
+
+**Query panel:** A round, translucent glass **Query** button sits in the **top-right corner**. It stays invisible until you move your mouse into that corner, at which point it fades in. Click it to open a floating panel where you can set `mode` and `date`; click **Apply** to update the URL and reload the calendar. Other query parameters (such as `theme`) are preserved.
 
 **Examples:**
 

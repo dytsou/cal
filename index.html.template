@@ -46,6 +46,194 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
         iframe {
             /* Note: Cross-origin iframe content cannot be styled directly */
         }
+
+        /* Apple "Liquid Glass" circular trigger: a translucent frosted puck
+           that refracts the calendar behind it, with a specular rim-light edge
+           and a floating drop shadow. */
+        #query-panel-trigger {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            z-index: 1002;
+            width: 46px;
+            height: 46px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            border: none;
+            border-radius: 50%;
+            cursor: pointer;
+            -webkit-appearance: none;
+            appearance: none;
+            opacity: 0;
+            transform: scale(0.82);
+            background:
+                linear-gradient(140deg,
+                    rgba(255, 255, 255, 0.30) 0%,
+                    rgba(255, 255, 255, 0.10) 38%,
+                    rgba(255, 255, 255, 0.02) 62%,
+                    rgba(255, 255, 255, 0.08) 100%);
+            -webkit-backdrop-filter: blur(14px) saturate(190%);
+            backdrop-filter: blur(14px) saturate(190%);
+            box-shadow:
+                inset 0 1.2px 1px rgba(255, 255, 255, 0.65),
+                inset 0 -1.5px 2px rgba(255, 255, 255, 0.10),
+                inset 0 0 14px rgba(255, 255, 255, 0.10),
+                0 8px 22px rgba(0, 0, 0, 0.38),
+                0 2px 6px rgba(0, 0, 0, 0.28);
+            transition:
+                opacity 0.35s cubic-bezier(0.22, 1, 0.36, 1),
+                transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1),
+                box-shadow 0.3s ease;
+        }
+
+        /* Refractive rim-light border drawn with a masked gradient ring. */
+        #query-panel-trigger::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: 50%;
+            padding: 1px;
+            background: linear-gradient(140deg,
+                rgba(255, 255, 255, 0.95) 0%,
+                rgba(255, 255, 255, 0.25) 30%,
+                rgba(255, 255, 255, 0) 55%,
+                rgba(255, 255, 255, 0.35) 100%);
+            -webkit-mask:
+                linear-gradient(#000 0 0) content-box,
+                linear-gradient(#000 0 0);
+            -webkit-mask-composite: xor;
+            mask-composite: exclude;
+            pointer-events: none;
+        }
+
+        /* Top specular gloss highlight. */
+        #query-panel-trigger::after {
+            content: '';
+            position: absolute;
+            top: 4px;
+            left: 50%;
+            width: 62%;
+            height: 34%;
+            transform: translateX(-50%);
+            border-radius: 50%;
+            background: radial-gradient(ellipse at center,
+                rgba(255, 255, 255, 0.75) 0%,
+                rgba(255, 255, 255, 0) 72%);
+            filter: blur(0.5px);
+            pointer-events: none;
+        }
+
+        #query-panel-trigger svg {
+            position: relative;
+            z-index: 1;
+            filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.45));
+        }
+
+        /* The trigger stays in the DOM (above the cross-origin iframe) so it is
+           always clickable; it is only visually revealed on hover, on Ctrl, or
+           while the panel is open. Ctrl alone is unreliable because the iframe
+           steals keyboard focus once the calendar is clicked. */
+        #query-panel-trigger:hover,
+        #query-panel-trigger.visible {
+            opacity: 1;
+            transform: scale(1);
+        }
+
+        #query-panel-trigger:hover {
+            box-shadow:
+                inset 0 1.2px 1px rgba(255, 255, 255, 0.75),
+                inset 0 -1.5px 2px rgba(255, 255, 255, 0.14),
+                inset 0 0 18px rgba(255, 255, 255, 0.16),
+                0 10px 28px rgba(0, 0, 0, 0.42),
+                0 3px 8px rgba(0, 0, 0, 0.30);
+        }
+
+        #query-panel-trigger:active {
+            transform: scale(0.92);
+            transition-duration: 0.09s;
+        }
+
+        #query-panel-trigger:focus-visible {
+            outline: none;
+            box-shadow:
+                inset 0 1.2px 1px rgba(255, 255, 255, 0.75),
+                inset 0 0 18px rgba(255, 255, 255, 0.16),
+                0 0 0 3px rgba(120, 170, 255, 0.55),
+                0 10px 28px rgba(0, 0, 0, 0.42);
+        }
+
+        #query-panel {
+            position: fixed;
+            top: 48px;
+            right: 12px;
+            z-index: 1001;
+            display: none;
+            width: 240px;
+            padding: 12px;
+            font-size: 13px;
+            color: #eee;
+            background: rgba(20, 20, 20, 0.95);
+            border: 1px solid #555;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        }
+
+        #query-panel.open {
+            display: block;
+        }
+
+        #query-panel label {
+            display: block;
+            margin-bottom: 4px;
+            font-size: 11px;
+            color: #aaa;
+        }
+
+        #query-panel select,
+        #query-panel input[type="date"] {
+            width: 100%;
+            margin-bottom: 10px;
+            padding: 6px 8px;
+            font-size: 13px;
+            color: #eee;
+            background: #333;
+            border: 1px solid #555;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+
+        #query-panel .panel-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 4px;
+        }
+
+        #query-panel .panel-actions button {
+            flex: 1;
+            padding: 6px 10px;
+            font-size: 12px;
+            color: #fff;
+            background: #444;
+            border: 1px solid #666;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        #query-panel .panel-actions button:hover {
+            background: #555;
+        }
+
+        #query-panel .panel-actions button.primary {
+            background: #2563eb;
+            border-color: #3b82f6;
+        }
+
+        #query-panel .panel-actions button.primary:hover {
+            background: #1d4ed8;
+        }
     </style>
 </head>
 
@@ -58,6 +246,33 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
         frameborder="0" width="100%"></iframe>
 
     <p style="position: absolute; bottom: 2px; left: 0; right: 0; text-align: center; font-size: 9px; color: #ffffff; background-color: #000000; margin: 0; padding: 4px; pointer-events: none;">Copyright (c) {{YEAR}} dytsou</p>
+
+    <button type="button" id="query-panel-trigger" aria-label="Open query panel" title="Query (mode / date)">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="4" y1="8" x2="20" y2="8"></line>
+            <line x1="4" y1="16" x2="20" y2="16"></line>
+            <circle cx="10" cy="8" r="2.6"></circle>
+            <circle cx="15" cy="16" r="2.6"></circle>
+        </svg>
+    </button>
+
+    <div id="query-panel" role="dialog" aria-label="Query parameters">
+        <label for="query-mode">Mode</label>
+        <select id="query-mode">
+            <option value="">Default (week)</option>
+            <option value="month">month</option>
+            <option value="week">week</option>
+            <option value="day">day</option>
+        </select>
+
+        <label for="query-date">Date</label>
+        <input type="date" id="query-date">
+
+        <div class="panel-actions">
+            <button type="button" id="query-panel-apply" class="primary">Apply</button>
+            <button type="button" id="query-panel-close">Close</button>
+        </div>
+    </div>
 
     <script>
         // Filter console logs to hide calendar URLs and sensitive information
@@ -340,6 +555,130 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
         });
 
         window.onload = () => document.body.removeAttribute('unresolved');
+
+        // Hidden query panel: visible while Ctrl is held or panel is open
+        (function initQueryPanel() {
+            const trigger = document.getElementById('query-panel-trigger');
+            const panel = document.getElementById('query-panel');
+            const modeSelect = document.getElementById('query-mode');
+            const dateInput = document.getElementById('query-date');
+            const applyBtn = document.getElementById('query-panel-apply');
+            const closeBtn = document.getElementById('query-panel-close');
+
+            let ctrlHeld = false;
+            let panelOpen = false;
+
+            function updateTriggerVisibility() {
+                if (panelOpen || ctrlHeld) {
+                    trigger.classList.add('visible');
+                } else {
+                    trigger.classList.remove('visible');
+                }
+            }
+
+            function openPanel() {
+                panelOpen = true;
+                panel.classList.add('open');
+                syncFormFromUrl();
+                updateTriggerVisibility();
+            }
+
+            function closePanel() {
+                panelOpen = false;
+                panel.classList.remove('open');
+                updateTriggerVisibility();
+            }
+
+            function yyyymmddToIso(yyyymmdd) {
+                const match = /^(\d{4})(\d{2})(\d{2})$/.exec(yyyymmdd);
+                if (!match) return '';
+                const [, year, month, day] = match;
+                const dateObj = new Date(parseInt(year, 10), parseInt(month, 10) - 1, parseInt(day, 10));
+                if (
+                    dateObj.getFullYear() == year &&
+                    dateObj.getMonth() == parseInt(month, 10) - 1 &&
+                    dateObj.getDate() == day
+                ) {
+                    return `${year}-${month}-${day}`;
+                }
+                return '';
+            }
+
+            function isoToYyyymmdd(iso) {
+                if (!iso) return '';
+                return iso.replace(/-/g, '');
+            }
+
+            function syncFormFromUrl() {
+                const params = new URLSearchParams(window.location.search);
+                const mode = params.get('mode');
+                if (mode && validModes.includes(mode.toLowerCase())) {
+                    modeSelect.value = mode.toLowerCase();
+                } else {
+                    modeSelect.value = '';
+                }
+
+                const date = params.get('date');
+                dateInput.value = date ? yyyymmddToIso(date) : '';
+            }
+
+            function applyQueryParams() {
+                const params = new URLSearchParams(window.location.search);
+                const mode = modeSelect.value.trim().toLowerCase();
+                const dateIso = dateInput.value;
+
+                if (mode && validModes.includes(mode)) {
+                    params.set('mode', mode);
+                } else {
+                    params.delete('mode');
+                }
+
+                if (dateIso) {
+                    const yyyymmdd = isoToYyyymmdd(dateIso);
+                    if (yyyymmdd) {
+                        params.set('date', yyyymmdd);
+                    } else {
+                        params.delete('date');
+                    }
+                } else {
+                    params.delete('date');
+                }
+
+                const query = params.toString();
+                const newUrl = query
+                    ? `${window.location.pathname}?${query}`
+                    : window.location.pathname;
+                window.location.assign(newUrl);
+            }
+
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Control') {
+                    ctrlHeld = true;
+                    updateTriggerVisibility();
+                }
+                if (e.key === 'Escape' && panelOpen) {
+                    closePanel();
+                }
+            });
+
+            document.addEventListener('keyup', (e) => {
+                if (e.key === 'Control') {
+                    ctrlHeld = false;
+                    updateTriggerVisibility();
+                }
+            });
+
+            window.addEventListener('blur', () => {
+                ctrlHeld = false;
+                updateTriggerVisibility();
+            });
+
+            trigger.addEventListener('click', openPanel);
+            closeBtn.addEventListener('click', closePanel);
+            applyBtn.addEventListener('click', applyQueryParams);
+
+            syncFormFromUrl();
+        })();
     </script>
 
 </body>
