@@ -25,6 +25,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Run tests
+        run: pnpm test
+
       - name: Create .env file
         env:
           WORKER_URL: ${{ secrets.WORKER_URL }}

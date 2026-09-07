@@ -28,6 +28,10 @@ wrangler secret put CALENDAR_URL
 wrangler secret put ENCRYPTION_KEY
 # Enter your Fernet encryption key (base64url-encoded 32-byte key)
 # Generate one with: node -e "console.log(require('crypto').randomBytes(32).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, ''))"
+
+# Enable the privacy-safe final-view cache with an opaque HMAC identity key
+wrangler secret put CACHE_IDENTITY_SECRET
+# Use a separate random secret; do not reuse a calendar URL or encryption key
 ```
 
 **Getting Google Calendar iCal URLs:**
@@ -95,6 +99,18 @@ The calendar supports URL parameters for navigation:
 - `index.html?mode=day&date=20250320` - Day view for March 20, 2025
 - `index.html?theme=light` - Light theme with default week view
 - `index.html?mode=month&theme=dark` - Month view with dark theme
+
+## Final-view cache
+
+When CACHE_IDENTITY_SECRET is configured, the Worker caches only successful, sanitized calendar pages and explicit calendar-data responses. The cache identity is an opaque HMAC digest of the configured source/filtering material and safe view parameters; viewer-provided url parameters never select a source or enter the identity.
+
+The normal freshness window is 10 minutes. A stale hit is served immediately, refreshed in the background, and can automatically revalidate in the calendar frame. A successful representation is retained for up to 24 hours as a last-known-good fallback when an upstream refresh fails. Viewer responses remain Cache-Control: no-store and do not expose cache timestamps.
+
+The Cache API is local to the data center handling the request, so the first request in a new location can still be a cold miss. Static assets, calendar-file downloads, authenticated/cookie-bearing requests, and unrecognized JSON resources bypass this final-view cache. If CACHE_IDENTITY_SECRET is missing, the Worker safely falls back to the live path.
+
+Changes to CALENDAR_URL, ENCRYPTION_KEY, or USER_EMAILS select new cache identities. Bump FINAL_VIEW_CACHE_VERSION in worker.js whenever privacy filtering or response-shape rules change. Existing entries then become unreachable without exposing or purging their contents.
+
+Set `CACHE_BYPASS=1` as a temporary incident or rollback control to disable cache reads, writes, and refreshes. Rotate `CACHE_IDENTITY_SECRET` to move to a new opaque namespace; keep it high-entropy and separate from the calendar or encryption secrets.
 
 ## Install Package
 
@@ -176,6 +192,7 @@ pnpm install -g @dytsou/calendar-build
 ### Scripts
 
 - `pnpm run build` - Build the HTML file from template
+- `pnpm test` - Run the Worker cache and route tests
 - `pnpm format` - Format code with Prettier
 - `pnpm format:check` - Check code formatting
 
@@ -246,13 +263,21 @@ This project uses a Cloudflare Worker to manage calendar URLs securely. Calendar
    node -e "console.log(require('crypto').randomBytes(32).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, ''))"
    ```
 
-6. **Deploy the Worker:**
+6. **Set the Cache Identity Secret:**
+
+   ```bash
+   wrangler secret put CACHE_IDENTITY_SECRET
+   ```
+
+   Use a separate random value for this HMAC secret. If it is not configured, the Worker continues to serve live sanitized responses without using the shared final-view cache.
+
+7. **Deploy the Worker:**
 
    ```bash
    wrangler deploy
    ```
 
-7. **Update your .env file:**
+8. **Update your .env file:**
    After deployment, update the `WORKER_URL` in your `.env` file with your worker URL:
 
    ```
@@ -261,7 +286,7 @@ This project uses a Cloudflare Worker to manage calendar URLs securely. Calendar
    WORKER_URL=https://your-domain.com
    ```
 
-8. **Rebuild your project:**
+9. **Rebuild your project:**
    ```bash
    pnpm run build
    ```

@@ -4,6 +4,16 @@ compatibility_date = "2025-12-28"
 
 # Environment variables (secrets should be set via wrangler secret put)
 # ENCRYPTION_KEY should be set as a secret: wrangler secret put ENCRYPTION_KEY
+# CALENDAR_URL should be set as a secret: wrangler secret put CALENDAR_URL
+# USER_EMAILS is optional: wrangler secret put USER_EMAILS
+# CACHE_IDENTITY_SECRET enables the privacy-safe final-view cache:
+# wrangler secret put CACHE_IDENTITY_SECRET
+# CACHE_BYPASS=1 temporarily disables cache reads, writes, and refreshes:
+# wrangler secret put CACHE_BYPASS
+#
+# The final-view cache uses caches.default inside worker.js. Do not enable a
+# global Workers Cache policy here: static assets and upstream requests are
+# intentionally kept outside the final-view cache boundary.
 #
 # Custom domain routes can be configured via:
 # 1. Cloudflare Dashboard: Workers & Pages > Your Worker > Settings > Triggers > Routes
@@ -31,4 +41,3 @@ invocation_logs = false
 [observability.traces]
 enabled = false
 head_sampling_rate = 1
-

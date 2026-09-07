@@ -14,6 +14,7 @@
  * - ENCRYPTION_KEY: Required Cloudflare Worker secret (for decrypting fernet:// URLs)
  * - CALENDAR_URL: Required Cloudflare Worker secret (comma-separated, can be plain or fernet:// encrypted)
  * - USER_EMAILS: Optional Cloudflare Worker secret (comma-separated list of user emails for declined event filtering)
+ * - CACHE_IDENTITY_SECRET: Required to enable the privacy-safe final-view cache
  *
  * Usage:
  * 1. Set CALENDAR_URL secret: wrangler secret put CALENDAR_URL
@@ -25,6 +26,45 @@
 
 // Import Fernet library - we'll need to bundle this for Workers
 // For now, we'll implement a basic Fernet decoder using Web Crypto API
+
+const FINAL_VIEW_CACHE_VERSION = 'v1';
+const FINAL_VIEW_CACHE_HOST = 'calendar-final-view.invalid';
+const FINAL_VIEW_CACHE_FRESHNESS_MS = 10 * 60 * 1000;
+const FINAL_VIEW_REVALIDATION_COOLDOWN_MS = FINAL_VIEW_CACHE_FRESHNESS_MS;
+const FINAL_VIEW_REVALIDATION_TRACKING_LIMIT = 1024;
+const FINAL_VIEW_CACHE_RETENTION_MS = 24 * 60 * 60 * 1000;
+const FINAL_VIEW_CACHE_RETENTION_SECONDS = FINAL_VIEW_CACHE_RETENTION_MS / 1000;
+const FINAL_VIEW_CACHE_STORED_AT_HEADER = 'X-Calendar-Cache-Stored-At';
+const FINAL_VIEW_CACHE_REVALIDATE_PARAM = '__cal_revalidate';
+const FINAL_VIEW_CACHE_STATUS_HEADER = 'X-Calendar-View-Status';
+const CALENDAR_UPSTREAM_ORIGIN = 'https://open-web-calendar.hosted.quelltext.eu';
+const FINAL_VIEW_CONTENT_TYPES = ['text/html', 'application/json'];
+const FINAL_VIEW_QUERY_KEYS = new Set([
+  'controls',
+  'date',
+  'css',
+  'event_url_geo',
+  'event_url_location',
+  'menu',
+  'menu_shows_calendar_names',
+  'menu_shows_description',
+  'menu_shows_title',
+  'mode',
+  'skin',
+  'start_of_week',
+  'style-event-status-cancelled',
+  'style-event-status-confirmed',
+  'style-event-status-tentative',
+  'tab',
+  'tabs',
+  'target',
+  'theme',
+  'title',
+]);
+const FINAL_VIEW_EVENT_QUERY_KEYS = new Set(['from', 'to', 'timezone']);
+const VIEWER_RESPONSE_HEADERS = ['content-type', 'access-control-allow-origin'];
+const finalViewRefreshes = new Map();
+const finalViewRevalidationTimes = new Map();
 
 /**
  * Decode base64url string
@@ -851,23 +891,486 @@ function processCalendarEventsJson(jsonData, userEmails = []) {
   return jsonData;
 }
 
+function isCalendarFilePath(pathname) {
+  const lowerPathname = pathname.toLowerCase();
+  return lowerPathname.endsWith('.ics') || lowerPathname.endsWith('.ical');
+}
+
+function isMainCalendarPagePath(pathname) {
+  return (
+    pathname === '/' ||
+    pathname === '/calendar.html' ||
+    pathname.endsWith('/calendar.html') ||
+    pathname === ''
+  );
+}
+
+function isSrcdocPath(pathname) {
+  return pathname === '/srcdoc' || pathname.startsWith('/srcdoc/');
+}
+
+function isJsonPath(pathname) {
+  return pathname.endsWith('.json');
+}
+
+function isCalendarEventsPath(pathname) {
+  return pathname.endsWith('.events.json');
+}
+
+function isCalendarDataPath(pathname) {
+  return pathname === '/calendar.json' || isCalendarEventsPath(pathname);
+}
+
+function isConfiguredCalendarPath(pathname) {
+  return isMainCalendarPagePath(pathname) || isSrcdocPath(pathname) || isJsonPath(pathname);
+}
+
+function isFinalViewPath(pathname) {
+  return isMainCalendarPagePath(pathname) || isCalendarDataPath(pathname);
+}
+
+function getFinalViewIdentityPath(pathname) {
+  return isMainCalendarPagePath(pathname) ? '/calendar.html' : pathname;
+}
+
+function shouldUseFinalViewCache(request, pathname) {
+  if (request.method !== 'GET' || !isFinalViewPath(pathname)) {
+    return false;
+  }
+
+  return !request.headers.has('cookie') && !request.headers.has('authorization');
+}
+
+function getFinalViewQueryKey(key, pathname = '') {
+  const normalizedKey = key.toLowerCase();
+  if (FINAL_VIEW_QUERY_KEYS.has(normalizedKey)) {
+    return normalizedKey;
+  }
+  return isCalendarEventsPath(pathname) && FINAL_VIEW_EVENT_QUERY_KEYS.has(normalizedKey)
+    ? normalizedKey
+    : null;
+}
+
+function getCacheQueryEntries(url, { sort = false } = {}) {
+  const entries = Array.from(url.searchParams.entries())
+    .map(([key, value]) => [getFinalViewQueryKey(key, url.pathname), value])
+    .filter(([key]) => key !== null);
+
+  if (!sort) {
+    return entries;
+  }
+
+  return entries.sort(([leftKey], [rightKey]) => {
+    if (leftKey === rightKey) {
+      return 0;
+    }
+    return leftKey < rightKey ? -1 : 1;
+  });
+}
+
+function canonicalizeCacheQuery(url) {
+  return getCacheQueryEntries(url, { sort: true })
+    .map(([key, value]) => {
+      return String(key.length) + ':' + key + String(value.length) + ':' + value;
+    })
+    .join('|');
+}
+
+function getResponseMediaType(response) {
+  return (response.headers.get('content-type') || '').split(';', 1)[0].trim().toLowerCase();
+}
+
+function isRevalidationRequest(url) {
+  return Array.from(url.searchParams.entries()).some(
+    ([key, value]) => key.toLowerCase() === FINAL_VIEW_CACHE_REVALIDATE_PARAM && value === '1'
+  );
+}
+
+async function createFinalViewCacheKey(url, env, userEmails) {
+  if (typeof env.CACHE_IDENTITY_SECRET !== 'string' || !env.CACHE_IDENTITY_SECRET.trim()) {
+    return null;
+  }
+
+  try {
+    const identity = JSON.stringify({
+      version: FINAL_VIEW_CACHE_VERSION,
+      configuredSource: env.CALENDAR_URL || '',
+      encryptionKey: env.ENCRYPTION_KEY || '',
+      userEmails,
+      pathname: getFinalViewIdentityPath(url.pathname),
+      query: canonicalizeCacheQuery(url),
+    });
+    const encoder = new TextEncoder();
+    const hmacKey = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(env.CACHE_IDENTITY_SECRET),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    const digest = await crypto.subtle.sign('HMAC', hmacKey, encoder.encode(identity));
+    const digestHex = Array.from(new Uint8Array(digest))
+      .map(byte => byte.toString(16).padStart(2, '0'))
+      .join('');
+
+    return new Request(
+      'https://' + FINAL_VIEW_CACHE_HOST + '/' + FINAL_VIEW_CACHE_VERSION + '/' + digestHex
+    );
+  } catch (error) {
+    return null;
+  }
+}
+
+function isJsonErrorOnlyBody(jsonData) {
+  if (!jsonData || typeof jsonData !== 'object' || Array.isArray(jsonData)) {
+    return false;
+  }
+
+  const errorKeys = new Set(['error', 'errors', 'detail', 'message', 'status']);
+  const keys = Object.keys(jsonData);
+  return keys.length > 0 && keys.every(key => errorKeys.has(key.toLowerCase()));
+}
+
+async function isCacheableFinalViewResponse(response) {
+  const contentType = getResponseMediaType(response);
+  if (response.status !== 200 || !FINAL_VIEW_CONTENT_TYPES.includes(contentType)) {
+    return false;
+  }
+
+  let body;
+  try {
+    body = await response.clone().text();
+  } catch (error) {
+    return false;
+  }
+  if (body.trim().length === 0) {
+    return false;
+  }
+
+  if (contentType === 'application/json') {
+    try {
+      const jsonData = JSON.parse(body);
+      if (jsonData === null || (typeof jsonData !== 'object' && !Array.isArray(jsonData))) {
+        return false;
+      }
+      return !isJsonErrorOnlyBody(jsonData);
+    } catch (error) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function getCacheEntryHeaders(response, storedAt) {
+  const headers = new Headers();
+  for (const name of VIEWER_RESPONSE_HEADERS) {
+    const value = response.headers.get(name);
+    if (value) {
+      headers.set(name, value);
+    }
+  }
+  headers.set('cache-control', 'public, max-age=' + String(FINAL_VIEW_CACHE_RETENTION_SECONDS));
+  headers.set(FINAL_VIEW_CACHE_STORED_AT_HEADER, String(storedAt));
+  return headers;
+}
+
+async function createFinalViewCacheEntry(response, storedAt = Date.now()) {
+  if (!(await isCacheableFinalViewResponse(response))) {
+    return null;
+  }
+
+  const body = await response.clone().arrayBuffer();
+  return new Response(body, {
+    status: 200,
+    headers: getCacheEntryHeaders(response, storedAt),
+  });
+}
+
+function readCacheStoredAt(response) {
+  const storedAtValue = response.headers.get(FINAL_VIEW_CACHE_STORED_AT_HEADER);
+  if (!storedAtValue) {
+    return null;
+  }
+  const storedAt = Number(storedAtValue);
+  if (!Number.isSafeInteger(storedAt) || storedAt < 0) {
+    return null;
+  }
+  return storedAt;
+}
+
+async function readFinalViewCacheEntry(response, now = Date.now()) {
+  if (
+    response.status !== 200 ||
+    !FINAL_VIEW_CONTENT_TYPES.includes(getResponseMediaType(response))
+  ) {
+    return null;
+  }
+
+  const storedAt = readCacheStoredAt(response);
+  if (storedAt === null || storedAt > now) {
+    return null;
+  }
+
+  const age = now - storedAt;
+  if (age >= FINAL_VIEW_CACHE_RETENTION_MS) {
+    return null;
+  }
+
+  return {
+    response,
+    stale: age >= FINAL_VIEW_CACHE_FRESHNESS_MS,
+  };
+}
+
+function getFinalViewCache() {
+  if (typeof caches === 'undefined' || !caches.default) {
+    return null;
+  }
+  return caches.default;
+}
+
+async function matchFinalViewCache(cache, cacheKey) {
+  if (!cache || !cacheKey) {
+    return null;
+  }
+
+  try {
+    const response = await cache.match(cacheKey);
+    return response ? await readFinalViewCacheEntry(response) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function injectStaleRevalidation(html) {
+  const script = [
+    '<script>',
+    '(function() {',
+    '  if (window.parent === window) {',
+    '    return;',
+    '  }',
+    '  window.setTimeout(function() {',
+    "    window.parent.postMessage({ type: 'calendar-cache-stale' }, '*');",
+    '  }, 0);',
+    '})();',
+    '</script>',
+  ].join('\n');
+
+  if (html.includes('</body>')) {
+    return html.replace('</body>', script + '</body>');
+  }
+  if (html.includes('</head>')) {
+    return html.replace('</head>', script + '</head>');
+  }
+  return html + script;
+}
+
+async function createViewerResponse(
+  response,
+  { stale = false, allowStaleRevalidation = true, cacheStatus = null } = {}
+) {
+  const contentType = getResponseMediaType(response);
+  let body = null;
+  if (response.status !== 204 && response.status !== 205 && response.status !== 304) {
+    body =
+      stale && allowStaleRevalidation && contentType === 'text/html'
+        ? injectStaleRevalidation(await response.clone().text())
+        : response.clone().body;
+  }
+
+  const headers = new Headers();
+  for (const name of VIEWER_RESPONSE_HEADERS) {
+    const value = response.headers.get(name);
+    if (value) {
+      headers.set(name, value);
+    }
+  }
+  headers.set('cache-control', 'no-store');
+  if (cacheStatus === 'updated' || cacheStatus === 'fresh' || cacheStatus === 'stale') {
+    headers.set(FINAL_VIEW_CACHE_STATUS_HEADER, cacheStatus);
+    headers.set('access-control-expose-headers', FINAL_VIEW_CACHE_STATUS_HEADER);
+  }
+
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function scheduleFinalViewWork(ctx, work) {
+  if (!ctx || typeof ctx.waitUntil !== 'function') {
+    return;
+  }
+
+  const promise = Promise.resolve()
+    .then(work)
+    .catch(() => {
+      // Background refreshes must not affect the response already sent to the viewer.
+    });
+  try {
+    ctx.waitUntil(promise);
+  } catch (error) {
+    // A missing or unavailable execution context is equivalent to a skipped refresh.
+  }
+}
+
+async function storeFinalViewCache(cache, cacheKey, response) {
+  if (!cache || !cacheKey) {
+    return false;
+  }
+
+  try {
+    const entry = await createFinalViewCacheEntry(response);
+    if (!entry) {
+      return false;
+    }
+    await cache.put(cacheKey, entry);
+    return true;
+  } catch (error) {
+    // Cache storage is an optimization; preserve the live response on cache failure.
+    return false;
+  }
+}
+
+function isFinalViewRevalidationCoolingDown(refreshKey, now = Date.now()) {
+  const lastAttemptAt = finalViewRevalidationTimes.get(refreshKey);
+  return lastAttemptAt !== undefined && now - lastAttemptAt < FINAL_VIEW_REVALIDATION_COOLDOWN_MS;
+}
+
+function markFinalViewRevalidation(refreshKey, now = Date.now()) {
+  finalViewRevalidationTimes.delete(refreshKey);
+  finalViewRevalidationTimes.set(refreshKey, now);
+  while (finalViewRevalidationTimes.size > FINAL_VIEW_REVALIDATION_TRACKING_LIMIT) {
+    const oldestKey = finalViewRevalidationTimes.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
+    }
+    finalViewRevalidationTimes.delete(oldestKey);
+  }
+}
+
+function scheduleFinalViewRefresh(cache, cacheKey, loadResponse, { enforceCooldown = false } = {}) {
+  if (!cache || !cacheKey) {
+    return null;
+  }
+
+  const refreshKey = cacheKey.url;
+  const existingRefresh = finalViewRefreshes.get(refreshKey);
+  if (existingRefresh) {
+    return existingRefresh;
+  }
+  if (enforceCooldown && isFinalViewRevalidationCoolingDown(refreshKey)) {
+    return null;
+  }
+  if (enforceCooldown) {
+    markFinalViewRevalidation(refreshKey);
+  }
+
+  const refreshPromise = (async () => {
+    try {
+      const response = await loadResponse();
+      return (await storeFinalViewCache(cache, cacheKey, response)) ? response : null;
+    } catch (error) {
+      // A failed refresh must leave the last-known-good cache entry untouched.
+      console.warn('Final-view cache refresh failed');
+      return null;
+    }
+  })();
+
+  finalViewRefreshes.set(refreshKey, refreshPromise);
+  refreshPromise.then(() => {
+    if (finalViewRefreshes.get(refreshKey) === refreshPromise) {
+      finalViewRefreshes.delete(refreshKey);
+    }
+  });
+  return refreshPromise;
+}
+
+function appendForwardedQueryParameters(sourceUrl, targetUrl, { allowlist = false } = {}) {
+  const entries = allowlist
+    ? getCacheQueryEntries(sourceUrl)
+    : Array.from(sourceUrl.searchParams.entries()).filter(
+        ([key]) =>
+          key.toLowerCase() !== 'url' && key.toLowerCase() !== FINAL_VIEW_CACHE_REVALIDATE_PARAM
+      );
+
+  for (const [key, value] of entries) {
+    targetUrl.searchParams.append(key, value);
+  }
+}
+
+async function decryptConfiguredCalendarUrls(calendarUrls, encryptionKey) {
+  const decryptedUrls = [];
+  for (const urlParam of calendarUrls) {
+    if (!urlParam.startsWith('fernet://')) {
+      decryptedUrls.push(urlParam);
+      continue;
+    }
+
+    if (!encryptionKey) {
+      throw new Error('ENCRYPTION_KEY not configured (required for fernet:// URLs)');
+    }
+
+    try {
+      decryptedUrls.push(await decryptFernetUrl(urlParam, encryptionKey));
+    } catch (error) {
+      throw new Error('Failed to decrypt calendar URL');
+    }
+  }
+  return decryptedUrls;
+}
+
+async function loadCalendarResponse({
+  url,
+  pathname,
+  calendarUrls,
+  encryptionKey,
+  userEmails,
+  finalView = false,
+  sensitiveValues = [],
+}) {
+  const decryptedUrls = await decryptConfiguredCalendarUrls(calendarUrls, encryptionKey);
+  const targetPath = isMainCalendarPagePath(pathname) ? '/calendar.html' : pathname;
+  const targetUrl = new URL(CALENDAR_UPSTREAM_ORIGIN + targetPath);
+  appendForwardedQueryParameters(url, targetUrl, { allowlist: finalView });
+  for (const decryptedUrl of decryptedUrls) {
+    targetUrl.searchParams.append('url', decryptedUrl);
+  }
+
+  const response = await fetch(targetUrl.toString(), {
+    method: 'GET',
+    cache: 'no-store',
+    headers: new Headers({
+      'User-Agent': 'Cloudflare-Worker',
+    }),
+  });
+  return await sanitizeResponse(response, pathname, userEmails, [
+    ...sensitiveValues,
+    ...calendarUrls,
+    ...decryptedUrls,
+    encryptionKey,
+    ...userEmails,
+  ]);
+}
+
 /**
  * Sanitize response body to hide calendar URLs in error messages
  * Only sanitizes HTML and JSON responses to avoid breaking JavaScript code
  * @param {Response} response - The response to sanitize
  * @param {string} pathname - The request pathname
  * @param {string[]} userEmails - Array of user email addresses to check for declined status
+ * @param {string[]} sensitiveValues - Configured values that must not appear in final bodies
  */
-async function sanitizeResponse(response, pathname, userEmails = []) {
+async function sanitizeResponse(response, pathname, userEmails = [], sensitiveValues = []) {
   const contentType = response.headers.get('content-type') || '';
 
   // Block ICS/calendar file downloads - check content type and pathname
   if (
     contentType.includes('text/calendar') ||
     contentType.includes('application/ics') ||
-    pathname.endsWith('.ics') ||
-    pathname.endsWith('.ICAL') ||
-    pathname.endsWith('.iCal')
+    isCalendarFilePath(pathname)
   ) {
     return new Response('Calendar file download is not allowed', {
       status: 403,
@@ -899,11 +1402,7 @@ async function sanitizeResponse(response, pathname, userEmails = []) {
   if (contentType.includes('application/json')) {
     // Check for calendar events endpoints - open-web-calendar uses /calendar.json
     // Also check for any .json file that might contain calendar events
-    const isCalendarEventsEndpoint =
-      pathname === '/calendar.events.json' ||
-      pathname === '/calendar.json' ||
-      pathname.endsWith('.events.json') ||
-      pathname.endsWith('.json');
+    const isCalendarEventsEndpoint = isJsonPath(pathname);
 
     if (isCalendarEventsEndpoint) {
       try {
@@ -912,7 +1411,7 @@ async function sanitizeResponse(response, pathname, userEmails = []) {
         sanitizedBody = JSON.stringify(processedData);
       } catch (error) {
         // If JSON parsing fails, continue with original body
-        console.error('Failed to parse calendar events JSON:', error);
+        console.warn('Calendar data response was not valid JSON');
       }
     }
   }
@@ -935,6 +1434,21 @@ async function sanitizeResponse(response, pathname, userEmails = []) {
     sanitizedBody = sanitizedBody.replace(pattern, '[Calendar URL hidden]');
   });
 
+  for (const sensitiveValue of sensitiveValues) {
+    if (typeof sensitiveValue !== 'string' || sensitiveValue.length === 0) {
+      continue;
+    }
+
+    const encodedValues = [
+      sensitiveValue,
+      encodeURI(sensitiveValue),
+      encodeURIComponent(sensitiveValue),
+    ];
+    for (const encodedValue of new Set(encodedValues)) {
+      sanitizedBody = sanitizedBody.replaceAll(encodedValue, '[Calendar URL hidden]');
+    }
+  }
+
   const responseHeaders = new Headers(response.headers);
   responseHeaders.set('Access-Control-Allow-Origin', '*');
 
@@ -946,40 +1460,29 @@ async function sanitizeResponse(response, pathname, userEmails = []) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     try {
       const url = new URL(request.url);
-
-      // ENCRYPTION_METHOD is hardcoded to 'fernet'
-      const ENCRYPTION_METHOD = 'fernet';
-
-      const encryptionKey = env.ENCRYPTION_KEY;
-      const calendarUrlSecret = env.CALENDAR_URL; // Read from Cloudflare Worker secret
-
-      // Parse user emails from secret for declined event filtering
-      // USER_EMAILS secret should be comma-separated list of emails
+      const encryptionKey = env.ENCRYPTION_KEY || '';
+      const calendarUrlSecret = env.CALENDAR_URL;
       const userEmails = parseUserEmails(env.USER_EMAILS);
 
-      if (!calendarUrlSecret) {
+      const calendarUrls =
+        typeof calendarUrlSecret === 'string'
+          ? calendarUrlSecret
+              .split(',')
+              .map(value => value.trim())
+              .filter(Boolean)
+          : [];
+      if (calendarUrls.length === 0) {
         return new Response('CALENDAR_URL not configured in Cloudflare Worker secrets', {
           status: 500,
           headers: { 'Content-Type': 'text/plain' },
         });
       }
 
-      // Parse calendar URLs from secret (comma-separated, can be plain or fernet://)
-      const calendarUrlsFromSecret = calendarUrlSecret
-        .split(',')
-        .map(s => s.trim())
-        .filter(s => s);
+      const hasFernetUrls = calendarUrls.some(value => value.startsWith('fernet://'));
 
-      // Use calendar URLs from secret (they may be fernet:// encrypted or plain)
-      const calendarUrls = calendarUrlsFromSecret;
-
-      // Check if any of the URLs are fernet:// encrypted
-      const hasFernetUrls = calendarUrls.some(url => url.startsWith('fernet://'));
-
-      // If we have fernet:// URLs, we need ENCRYPTION_KEY
       if (hasFernetUrls && !encryptionKey) {
         return new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', {
           status: 500,
@@ -987,11 +1490,8 @@ export default {
         });
       }
 
-      // Get the pathname to determine request type
       const pathname = url.pathname;
-
-      // Block ICS file downloads - prevent access to raw calendar files
-      if (pathname.endsWith('.ics') || pathname.endsWith('.ICAL') || pathname.endsWith('.iCal')) {
+      if (isCalendarFilePath(pathname)) {
         return new Response('Calendar file download is not allowed', {
           status: 403,
           headers: {
@@ -1001,156 +1501,78 @@ export default {
         });
       }
 
-      // Check if this is the main calendar page request
-      const isMainCalendarPage =
-        pathname === '/' ||
-        pathname === '/calendar.html' ||
-        pathname.endsWith('/calendar.html') ||
-        pathname === '';
-
-      // Check if this is an API endpoint that needs calendar URLs
-      // This includes /srcdoc, /calendar.events.json, /calendar.json, etc.
-      const isApiEndpoint =
-        pathname === '/srcdoc' ||
-        pathname.startsWith('/srcdoc') ||
-        pathname === '/calendar.events.json' ||
-        pathname === '/calendar.json' ||
-        pathname.endsWith('.events.json') ||
-        pathname.endsWith('.json');
-
-      // For API endpoints like /srcdoc, always use calendar URLs from secret
-      if (isApiEndpoint) {
-        // Build the target URL
-        const targetUrl = new URL(`https://open-web-calendar.hosted.quelltext.eu${pathname}`);
-
-        // Copy all query parameters except 'url'
-        for (const [key, value] of url.searchParams.entries()) {
-          if (key !== 'url') {
-            targetUrl.searchParams.append(key, value);
-          }
-        }
-
-        // Decrypt and add calendar URLs from secret
-        // ENCRYPTION_METHOD is hardcoded to 'fernet'
-        const decryptedUrls = [];
-        for (const urlParam of calendarUrls) {
-          if (urlParam.startsWith('fernet://')) {
-            if (!encryptionKey) {
-              return new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', {
-                status: 500,
-                headers: { 'Content-Type': 'text/plain' },
-              });
-            }
-            try {
-              const decrypted = await decryptFernetUrl(urlParam, encryptionKey);
-              decryptedUrls.push(decrypted);
-            } catch (error) {
-              return new Response(`Failed to decrypt calendar URL: ${error.message}`, {
-                status: 500,
-                headers: { 'Content-Type': 'text/plain' },
-              });
-            }
-          } else {
-            // Plain URL, use as-is
-            decryptedUrls.push(urlParam);
-          }
-        }
-
-        // Add decrypted URLs
-        for (const decryptedUrl of decryptedUrls) {
-          targetUrl.searchParams.append('url', decryptedUrl);
-        }
-
-        // Forward all headers from the original request
-        const requestHeaders = new Headers();
-        request.headers.forEach((value, key) => {
-          if (
-            key.toLowerCase() !== 'host' &&
-            key.toLowerCase() !== 'cf-ray' &&
-            key.toLowerCase() !== 'cf-connecting-ip'
-          ) {
-            requestHeaders.set(key, value);
-          }
+      const isFinalViewPathRequest = request.method === 'GET' && isFinalViewPath(pathname);
+      const isFinalViewRequest = shouldUseFinalViewCache(request, pathname);
+      const cache = isFinalViewRequest && env.CACHE_BYPASS !== '1' ? getFinalViewCache() : null;
+      const cacheKey = cache ? await createFinalViewCacheKey(url, env, userEmails) : null;
+      const loadResponse = () =>
+        loadCalendarResponse({
+          url,
+          pathname,
+          calendarUrls,
+          encryptionKey,
+          userEmails,
+          finalView: isFinalViewPathRequest,
+          sensitiveValues: [calendarUrlSecret, env.USER_EMAILS || ''],
         });
+      const isRevalidation = Boolean(cache && cacheKey && isRevalidationRequest(url));
+      const cachedEntry = await matchFinalViewCache(cache, cacheKey);
 
-        const response = await fetch(targetUrl.toString(), {
-          headers: requestHeaders,
+      if (isRevalidation) {
+        if (cachedEntry) {
+          const refreshWasCoolingDown =
+            !finalViewRefreshes.has(cacheKey.url) &&
+            isFinalViewRevalidationCoolingDown(cacheKey.url);
+          const refreshPromise = scheduleFinalViewRefresh(cache, cacheKey, loadResponse, {
+            enforceCooldown: true,
+          });
+          const refreshedResponse = refreshPromise ? await refreshPromise : null;
+          if (refreshedResponse) {
+            return await createViewerResponse(refreshedResponse, {
+              cacheStatus: 'updated',
+            });
+          }
+          return await createViewerResponse(cachedEntry.response, {
+            allowStaleRevalidation: false,
+            cacheStatus: refreshWasCoolingDown ? (cachedEntry.stale ? 'stale' : 'fresh') : 'stale',
+          });
+        }
+
+        markFinalViewRevalidation(cacheKey.url);
+        const refreshedResponse = await loadResponse();
+        const stored = await storeFinalViewCache(cache, cacheKey, refreshedResponse);
+        return await createViewerResponse(refreshedResponse, {
+          cacheStatus: stored ? 'updated' : 'stale',
         });
-
-        // Sanitize response to hide calendar URLs in error messages
-        // Pass pathname for calendar events processing and user emails for declined filtering
-        return await sanitizeResponse(response, pathname, userEmails);
       }
 
-      // Handle main calendar page requests - always add calendar URLs from secret
-      if (isMainCalendarPage) {
-        // Decrypt calendar URLs from secret
-        // ENCRYPTION_METHOD is hardcoded to 'fernet'
-        const decryptedUrls = [];
-        for (const urlParam of calendarUrls) {
-          if (urlParam.startsWith('fernet://')) {
-            if (!encryptionKey) {
-              return new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', {
-                status: 500,
-                headers: { 'Content-Type': 'text/plain' },
-              });
-            }
-            try {
-              const decrypted = await decryptFernetUrl(urlParam, encryptionKey);
-              decryptedUrls.push(decrypted);
-            } catch (error) {
-              return new Response(`Failed to decrypt calendar URL: ${error.message}`, {
-                status: 500,
-                headers: { 'Content-Type': 'text/plain' },
-              });
-            }
-          } else {
-            // Plain URL, use as-is
-            decryptedUrls.push(urlParam);
-          }
+      if (cachedEntry) {
+        if (cachedEntry.stale) {
+          scheduleFinalViewWork(ctx, () => scheduleFinalViewRefresh(cache, cacheKey, loadResponse));
         }
-
-        // Build the open-web-calendar URL with decrypted URLs
-        const calendarUrl = new URL('https://open-web-calendar.hosted.quelltext.eu/calendar.html');
-
-        // Copy all query parameters except 'url' (calendar URLs come from secret)
-        for (const [key, value] of url.searchParams.entries()) {
-          if (key !== 'url') {
-            calendarUrl.searchParams.append(key, value);
-          }
-        }
-
-        // Add decrypted URLs from secret
-        for (const decryptedUrl of decryptedUrls) {
-          calendarUrl.searchParams.append('url', decryptedUrl);
-        }
-
-        // Fetch from open-web-calendar
-        const response = await fetch(calendarUrl.toString(), {
-          headers: {
-            'User-Agent': request.headers.get('User-Agent') || 'Cloudflare-Worker',
-          },
+        return await createViewerResponse(cachedEntry.response, {
+          stale: cachedEntry.stale,
         });
-
-        // Sanitize response to hide calendar URLs in error messages
-        // Pass pathname for calendar events processing
-        return await sanitizeResponse(response, pathname, userEmails);
       }
 
-      // For all other requests (static resources, etc.), proxy directly
-      let targetPath = pathname;
-      if (pathname === '/' || pathname === '') {
-        targetPath = '/calendar.html';
+      if (isConfiguredCalendarPath(pathname)) {
+        const response = await loadResponse();
+        if (isFinalViewPathRequest) {
+          const viewerResponse = await createViewerResponse(response);
+          if (isFinalViewRequest) {
+            scheduleFinalViewWork(ctx, () => storeFinalViewCache(cache, cacheKey, response));
+          }
+          return viewerResponse;
+        }
+        return response;
       }
 
-      const targetUrl = new URL(
-        `https://open-web-calendar.hosted.quelltext.eu${targetPath}${url.search}`
-      );
+      // For all other requests (static resources, etc.), proxy directly.
+      const targetPath = pathname === '/' || pathname === '' ? '/calendar.html' : pathname;
+      const targetUrl = new URL(CALENDAR_UPSTREAM_ORIGIN + targetPath + url.search);
 
-      // Forward all headers from the original request
       const requestHeaders = new Headers();
       request.headers.forEach((value, key) => {
-        // Skip certain headers that shouldn't be forwarded
         if (
           key.toLowerCase() !== 'host' &&
           key.toLowerCase() !== 'cf-ray' &&
@@ -1163,14 +1585,19 @@ export default {
       const response = await fetch(targetUrl.toString(), {
         headers: requestHeaders,
       });
-
-      // Sanitize response to hide calendar URLs in error messages
-      // Pass pathname for calendar events processing
-      return await sanitizeResponse(response, pathname, userEmails);
+      return await sanitizeResponse(response, pathname, userEmails, [
+        calendarUrlSecret,
+        encryptionKey,
+        env.USER_EMAILS || '',
+        ...calendarUrls,
+      ]);
     } catch (error) {
-      return new Response(`Error: ${error.message}`, {
+      return new Response('Calendar service temporarily unavailable', {
         status: 500,
-        headers: { 'Content-Type': 'text/plain' },
+        headers: {
+          'Content-Type': 'text/plain',
+          'Access-Control-Allow-Origin': '*',
+        },
       });
     }
   },
