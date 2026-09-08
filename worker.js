@@ -1627,7 +1627,7 @@ export default {
       const cachedEntry = await matchFinalViewCache(cache, cacheKey);
 
       if (isRevalidation) {
-        return handleFinalViewRevalidation(cache, cacheKey, loadResponse, cachedEntry);
+        return await handleFinalViewRevalidation(cache, cacheKey, loadResponse, cachedEntry);
       }
 
       const cachedResponse = await handleCachedFinalViewRequest(
@@ -1654,7 +1654,7 @@ export default {
         return configuredResponse;
       }
 
-      return proxyStaticRequest(request, url, pathname, userEmails, [
+      return await proxyStaticRequest(request, url, pathname, userEmails, [
         calendarUrlSecret,
         encryptionKey,
         env.USER_EMAILS || '',
