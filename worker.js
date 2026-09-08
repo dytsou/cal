@@ -38,7 +38,7 @@ const FINAL_VIEW_CACHE_STORED_AT_HEADER = 'X-Calendar-Cache-Stored-At';
 const FINAL_VIEW_CACHE_REVALIDATE_PARAM = '__cal_revalidate';
 const FINAL_VIEW_CACHE_STATUS_HEADER = 'X-Calendar-View-Status';
 const CALENDAR_UPSTREAM_ORIGIN = 'https://open-web-calendar.hosted.quelltext.eu';
-const FINAL_VIEW_CONTENT_TYPES = ['text/html', 'application/json'];
+const FINAL_VIEW_CONTENT_TYPES = new Set(['text/html', 'application/json']);
 const FINAL_VIEW_QUERY_KEYS = new Set([
   'controls',
   'date',
@@ -794,28 +794,6 @@ function removeCalendarName(calendar) {
  * @param {string[]} userEmails - Array of user email addresses to check for declined status
  */
 function processCalendarEventsJson(jsonData, userEmails = []) {
-  // Debug: Log first event structure to understand data format
-  // TODO: Remove or make conditional in production
-  try {
-    let firstEvent = null;
-    if (Array.isArray(jsonData) && jsonData.length > 0) {
-      firstEvent = jsonData[0];
-    } else if (jsonData && typeof jsonData === 'object') {
-      if (Array.isArray(jsonData.events) && jsonData.events.length > 0) {
-        firstEvent = jsonData.events[0];
-      } else if (Array.isArray(jsonData.calendars) && jsonData.calendars.length > 0) {
-        const firstCalendar = jsonData.calendars[0];
-        if (Array.isArray(firstCalendar.events) && firstCalendar.events.length > 0) {
-          firstEvent = firstCalendar.events[0];
-        }
-      }
-    }
-
-    // Debug logging removed - CLASS detection is working
-  } catch (e) {
-    // Ignore errors
-  }
-
   if (Array.isArray(jsonData)) {
     // Format: [{event1}, {event2}, ...]
     return mergeConsecutiveEvents(jsonData, userEmails);
@@ -980,6 +958,11 @@ function getResponseMediaType(response) {
   return (response.headers.get('content-type') || '').split(';', 1)[0].trim().toLowerCase();
 }
 
+function reportHandledError(message, error) {
+  const errorType = error instanceof Error ? error.name : typeof error;
+  console.warn(`${message} (${errorType})`);
+}
+
 function isRevalidationRequest(url) {
   return Array.from(url.searchParams.entries()).some(
     ([key, value]) => key.toLowerCase() === FINAL_VIEW_CACHE_REVALIDATE_PARAM && value === '1'
@@ -1017,6 +1000,7 @@ async function createFinalViewCacheKey(url, env, userEmails) {
       'https://' + FINAL_VIEW_CACHE_HOST + '/' + FINAL_VIEW_CACHE_VERSION + '/' + digestHex
     );
   } catch (error) {
+    reportHandledError('Final-view cache identity generation failed', error);
     return null;
   }
 }
@@ -1033,7 +1017,7 @@ function isJsonErrorOnlyBody(jsonData) {
 
 async function isCacheableFinalViewResponse(response) {
   const contentType = getResponseMediaType(response);
-  if (response.status !== 200 || !FINAL_VIEW_CONTENT_TYPES.includes(contentType)) {
+  if (response.status !== 200 || !FINAL_VIEW_CONTENT_TYPES.has(contentType)) {
     return false;
   }
 
@@ -1041,6 +1025,10 @@ async function isCacheableFinalViewResponse(response) {
   try {
     body = await response.clone().text();
   } catch (error) {
+    reportHandledError(
+      'Final-view response body could not be inspected; response will not be cached',
+      error
+    );
     return false;
   }
   if (body.trim().length === 0) {
@@ -1055,6 +1043,10 @@ async function isCacheableFinalViewResponse(response) {
       }
       return !isJsonErrorOnlyBody(jsonData);
     } catch (error) {
+      reportHandledError(
+        'Final-view response body was not valid JSON; response will not be cached',
+        error
+      );
       return false;
     }
   }
@@ -1100,10 +1092,7 @@ function readCacheStoredAt(response) {
 }
 
 async function readFinalViewCacheEntry(response, now = Date.now()) {
-  if (
-    response.status !== 200 ||
-    !FINAL_VIEW_CONTENT_TYPES.includes(getResponseMediaType(response))
-  ) {
+  if (response.status !== 200 || !FINAL_VIEW_CONTENT_TYPES.has(getResponseMediaType(response))) {
     return null;
   }
 
@@ -1139,6 +1128,10 @@ async function matchFinalViewCache(cache, cacheKey) {
     const response = await cache.match(cacheKey);
     return response ? await readFinalViewCacheEntry(response) : null;
   } catch (error) {
+    reportHandledError(
+      'Final-view cache lookup failed; request continues without cached response',
+      error
+    );
     return null;
   }
 }
@@ -1206,13 +1199,16 @@ function scheduleFinalViewWork(ctx, work) {
 
   const promise = Promise.resolve()
     .then(work)
-    .catch(() => {
-      // Background refreshes must not affect the response already sent to the viewer.
+    .catch(error => {
+      reportHandledError('Background final-view cache work failed; response is unaffected', error);
     });
   try {
     ctx.waitUntil(promise);
   } catch (error) {
-    // A missing or unavailable execution context is equivalent to a skipped refresh.
+    reportHandledError(
+      'Final-view cache work could not be registered; response is unaffected',
+      error
+    );
   }
 }
 
@@ -1229,7 +1225,7 @@ async function storeFinalViewCache(cache, cacheKey, response) {
     await cache.put(cacheKey, entry);
     return true;
   } catch (error) {
-    // Cache storage is an optimization; preserve the live response on cache failure.
+    reportHandledError('Final-view cache storage failed; live response is preserved', error);
     return false;
   }
 }
@@ -1273,8 +1269,10 @@ function scheduleFinalViewRefresh(cache, cacheKey, loadResponse, { enforceCooldo
       const response = await loadResponse();
       return (await storeFinalViewCache(cache, cacheKey, response)) ? response : null;
     } catch (error) {
-      // A failed refresh must leave the last-known-good cache entry untouched.
-      console.warn('Final-view cache refresh failed');
+      reportHandledError(
+        'Final-view cache refresh failed; last-known-good entry is preserved',
+        error
+      );
       return null;
     }
   })();
@@ -1410,8 +1408,10 @@ async function sanitizeResponse(response, pathname, userEmails = [], sensitiveVa
         const processedData = processCalendarEventsJson(jsonData, userEmails);
         sanitizedBody = JSON.stringify(processedData);
       } catch (error) {
-        // If JSON parsing fails, continue with original body
-        console.warn('Calendar data response was not valid JSON');
+        reportHandledError(
+          'Calendar data response was not valid JSON; original body is preserved',
+          error
+        );
       }
     }
   }
@@ -1459,37 +1459,145 @@ async function sanitizeResponse(response, pathname, userEmails = [], sensitiveVa
   });
 }
 
+function getCalendarConfiguration(env) {
+  const encryptionKey = env.ENCRYPTION_KEY || '';
+  const calendarUrlSecret = env.CALENDAR_URL;
+  const userEmails = parseUserEmails(env.USER_EMAILS);
+  const calendarUrls =
+    typeof calendarUrlSecret === 'string'
+      ? calendarUrlSecret
+          .split(',')
+          .map(value => value.trim())
+          .filter(Boolean)
+      : [];
+
+  if (calendarUrls.length === 0) {
+    return {
+      errorResponse: new Response('CALENDAR_URL not configured in Cloudflare Worker secrets', {
+        status: 500,
+        headers: { 'Content-Type': 'text/plain' },
+      }),
+    };
+  }
+
+  const hasFernetUrls = calendarUrls.some(value => value.startsWith('fernet://'));
+  if (hasFernetUrls && !encryptionKey) {
+    return {
+      errorResponse: new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', {
+        status: 500,
+        headers: { 'Content-Type': 'text/plain' },
+      }),
+    };
+  }
+
+  return { calendarUrlSecret, calendarUrls, encryptionKey, userEmails };
+}
+
+function getRevalidationCacheStatus(cachedEntry, refreshWasCoolingDown) {
+  if (!refreshWasCoolingDown || cachedEntry.stale) {
+    return 'stale';
+  }
+  return 'fresh';
+}
+
+async function handleFinalViewRevalidation(cache, cacheKey, loadResponse, cachedEntry) {
+  if (!cachedEntry) {
+    markFinalViewRevalidation(cacheKey.url);
+    const refreshedResponse = await loadResponse();
+    const stored = await storeFinalViewCache(cache, cacheKey, refreshedResponse);
+    return createViewerResponse(refreshedResponse, {
+      cacheStatus: stored ? 'updated' : 'stale',
+    });
+  }
+
+  const refreshWasCoolingDown =
+    !finalViewRefreshes.has(cacheKey.url) && isFinalViewRevalidationCoolingDown(cacheKey.url);
+  const refreshPromise = scheduleFinalViewRefresh(cache, cacheKey, loadResponse, {
+    enforceCooldown: true,
+  });
+  const refreshedResponse = refreshPromise ? await refreshPromise : null;
+  if (refreshedResponse) {
+    return createViewerResponse(refreshedResponse, {
+      cacheStatus: 'updated',
+    });
+  }
+
+  return createViewerResponse(cachedEntry.response, {
+    allowStaleRevalidation: false,
+    cacheStatus: getRevalidationCacheStatus(cachedEntry, refreshWasCoolingDown),
+  });
+}
+
+async function handleCachedFinalViewRequest(ctx, cache, cacheKey, cachedEntry, loadResponse) {
+  if (!cachedEntry) {
+    return null;
+  }
+
+  if (cachedEntry.stale) {
+    scheduleFinalViewWork(ctx, () => scheduleFinalViewRefresh(cache, cacheKey, loadResponse));
+  }
+  return createViewerResponse(cachedEntry.response, {
+    stale: cachedEntry.stale,
+  });
+}
+
+async function handleConfiguredCalendarRequest({
+  cache,
+  cacheKey,
+  ctx,
+  isFinalViewPathRequest,
+  isFinalViewRequest,
+  loadResponse,
+  pathname,
+}) {
+  if (!isConfiguredCalendarPath(pathname)) {
+    return null;
+  }
+
+  const response = await loadResponse();
+  if (!isFinalViewPathRequest) {
+    return response;
+  }
+
+  const viewerResponse = await createViewerResponse(response);
+  if (isFinalViewRequest) {
+    scheduleFinalViewWork(ctx, () => storeFinalViewCache(cache, cacheKey, response));
+  }
+  return viewerResponse;
+}
+
+async function proxyStaticRequest(request, url, pathname, userEmails, sensitiveValues) {
+  // For all other requests (static resources, etc.), proxy directly.
+  const targetPath = pathname === '/' || pathname === '' ? '/calendar.html' : pathname;
+  const targetUrl = new URL(CALENDAR_UPSTREAM_ORIGIN + targetPath + url.search);
+
+  const requestHeaders = new Headers();
+  request.headers.forEach((value, key) => {
+    if (
+      key.toLowerCase() !== 'host' &&
+      key.toLowerCase() !== 'cf-ray' &&
+      key.toLowerCase() !== 'cf-connecting-ip'
+    ) {
+      requestHeaders.set(key, value);
+    }
+  });
+
+  const response = await fetch(targetUrl.toString(), {
+    headers: requestHeaders,
+  });
+  return sanitizeResponse(response, pathname, userEmails, sensitiveValues);
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
       const url = new URL(request.url);
-      const encryptionKey = env.ENCRYPTION_KEY || '';
-      const calendarUrlSecret = env.CALENDAR_URL;
-      const userEmails = parseUserEmails(env.USER_EMAILS);
-
-      const calendarUrls =
-        typeof calendarUrlSecret === 'string'
-          ? calendarUrlSecret
-              .split(',')
-              .map(value => value.trim())
-              .filter(Boolean)
-          : [];
-      if (calendarUrls.length === 0) {
-        return new Response('CALENDAR_URL not configured in Cloudflare Worker secrets', {
-          status: 500,
-          headers: { 'Content-Type': 'text/plain' },
-        });
+      const configuration = getCalendarConfiguration(env);
+      if (configuration.errorResponse) {
+        return configuration.errorResponse;
       }
 
-      const hasFernetUrls = calendarUrls.some(value => value.startsWith('fernet://'));
-
-      if (hasFernetUrls && !encryptionKey) {
-        return new Response('ENCRYPTION_KEY not configured (required for fernet:// URLs)', {
-          status: 500,
-          headers: { 'Content-Type': 'text/plain' },
-        });
-      }
-
+      const { calendarUrlSecret, calendarUrls, encryptionKey, userEmails } = configuration;
       const pathname = url.pathname;
       if (isCalendarFilePath(pathname)) {
         return new Response('Calendar file download is not allowed', {
@@ -1519,79 +1627,44 @@ export default {
       const cachedEntry = await matchFinalViewCache(cache, cacheKey);
 
       if (isRevalidation) {
-        if (cachedEntry) {
-          const refreshWasCoolingDown =
-            !finalViewRefreshes.has(cacheKey.url) &&
-            isFinalViewRevalidationCoolingDown(cacheKey.url);
-          const refreshPromise = scheduleFinalViewRefresh(cache, cacheKey, loadResponse, {
-            enforceCooldown: true,
-          });
-          const refreshedResponse = refreshPromise ? await refreshPromise : null;
-          if (refreshedResponse) {
-            return await createViewerResponse(refreshedResponse, {
-              cacheStatus: 'updated',
-            });
-          }
-          return await createViewerResponse(cachedEntry.response, {
-            allowStaleRevalidation: false,
-            cacheStatus: refreshWasCoolingDown ? (cachedEntry.stale ? 'stale' : 'fresh') : 'stale',
-          });
-        }
-
-        markFinalViewRevalidation(cacheKey.url);
-        const refreshedResponse = await loadResponse();
-        const stored = await storeFinalViewCache(cache, cacheKey, refreshedResponse);
-        return await createViewerResponse(refreshedResponse, {
-          cacheStatus: stored ? 'updated' : 'stale',
-        });
+        return handleFinalViewRevalidation(cache, cacheKey, loadResponse, cachedEntry);
       }
 
-      if (cachedEntry) {
-        if (cachedEntry.stale) {
-          scheduleFinalViewWork(ctx, () => scheduleFinalViewRefresh(cache, cacheKey, loadResponse));
-        }
-        return await createViewerResponse(cachedEntry.response, {
-          stale: cachedEntry.stale,
-        });
+      const cachedResponse = await handleCachedFinalViewRequest(
+        ctx,
+        cache,
+        cacheKey,
+        cachedEntry,
+        loadResponse
+      );
+      if (cachedResponse) {
+        return cachedResponse;
       }
 
-      if (isConfiguredCalendarPath(pathname)) {
-        const response = await loadResponse();
-        if (isFinalViewPathRequest) {
-          const viewerResponse = await createViewerResponse(response);
-          if (isFinalViewRequest) {
-            scheduleFinalViewWork(ctx, () => storeFinalViewCache(cache, cacheKey, response));
-          }
-          return viewerResponse;
-        }
-        return response;
-      }
-
-      // For all other requests (static resources, etc.), proxy directly.
-      const targetPath = pathname === '/' || pathname === '' ? '/calendar.html' : pathname;
-      const targetUrl = new URL(CALENDAR_UPSTREAM_ORIGIN + targetPath + url.search);
-
-      const requestHeaders = new Headers();
-      request.headers.forEach((value, key) => {
-        if (
-          key.toLowerCase() !== 'host' &&
-          key.toLowerCase() !== 'cf-ray' &&
-          key.toLowerCase() !== 'cf-connecting-ip'
-        ) {
-          requestHeaders.set(key, value);
-        }
+      const configuredResponse = await handleConfiguredCalendarRequest({
+        cache,
+        cacheKey,
+        ctx,
+        isFinalViewPathRequest,
+        isFinalViewRequest,
+        loadResponse,
+        pathname,
       });
+      if (configuredResponse) {
+        return configuredResponse;
+      }
 
-      const response = await fetch(targetUrl.toString(), {
-        headers: requestHeaders,
-      });
-      return await sanitizeResponse(response, pathname, userEmails, [
+      return proxyStaticRequest(request, url, pathname, userEmails, [
         calendarUrlSecret,
         encryptionKey,
         env.USER_EMAILS || '',
         ...calendarUrls,
       ]);
     } catch (error) {
+      reportHandledError(
+        'Calendar service request failed; returning a generic error response',
+        error
+      );
       return new Response('Calendar service temporarily unavailable', {
         status: 500,
         headers: {
