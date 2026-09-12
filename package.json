@@ -17,6 +17,7 @@
   ],
   "scripts": {
     "build": "node scripts/build.js",
+    "test": "node --test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "publish:npmjs": "pnpm publish --access public"

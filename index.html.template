@@ -522,7 +522,98 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
         // Set iframe source
         const iframe = document.getElementById('open-web-calendar');
-        iframe.src = buildCalendarUrl(calendarConfig);
+        const calendarFrameUrl = buildCalendarUrl(calendarConfig);
+
+        // A stale final-view response asks the parent to revalidate both the
+        // page and its derived data before replacing the iframe. The parent
+        // owns this lifecycle because the cached page is cross-origin.
+        const finalViewRevalidateParam = '__cal_revalidate';
+        const finalViewStatusHeader = 'X-Calendar-View-Status';
+        let revalidationInFlight = null;
+
+        function removeQueryParameter(url, parameter) {
+            for (const key of Array.from(url.searchParams.keys())) {
+                if (key.toLowerCase() === parameter) {
+                    url.searchParams.delete(key);
+                }
+            }
+        }
+
+        function makeRevalidationUrl(url) {
+            const nextUrl = new URL(url.toString());
+            removeQueryParameter(nextUrl, 'url');
+            removeQueryParameter(nextUrl, finalViewRevalidateParam);
+            nextUrl.searchParams.set(finalViewRevalidateParam, '1');
+            return nextUrl;
+        }
+
+        function makeCalendarDataUrl(pageUrl) {
+            const dataUrl = new URL(pageUrl.toString());
+            dataUrl.pathname = /\.html$/i.test(dataUrl.pathname)
+                ? dataUrl.pathname.replace(/\.html$/i, '.json')
+                : '/calendar.json';
+            return dataUrl;
+        }
+
+        function confirmsFinalViewRefresh(response) {
+            const status = response.headers.get(finalViewStatusHeader);
+            return response.ok && (status === 'updated' || status === 'fresh');
+        }
+
+        function fetchFinalViewRevalidation(url) {
+            return fetch(url.toString(), {
+                cache: 'no-store',
+                credentials: 'omit',
+            });
+        }
+
+        function revalidateStaleCalendar() {
+            if (revalidationInFlight) {
+                return revalidationInFlight;
+            }
+
+            const pageUrl = new URL(iframe.src);
+            const pageRevalidationUrl = makeRevalidationUrl(pageUrl);
+            const dataRevalidationUrl = makeRevalidationUrl(makeCalendarDataUrl(pageUrl));
+            revalidationInFlight = Promise.all([
+                fetchFinalViewRevalidation(pageRevalidationUrl),
+                fetchFinalViewRevalidation(dataRevalidationUrl),
+            ])
+                .then(([pageResponse, dataResponse]) => {
+                    if (!confirmsFinalViewRefresh(pageResponse) || !confirmsFinalViewRefresh(dataResponse)) {
+                        return;
+                    }
+                    if (iframe.src !== pageUrl.toString()) {
+                        return;
+                    }
+
+                    const nextPageUrl = new URL(pageUrl.toString());
+                    removeQueryParameter(nextPageUrl, finalViewRevalidateParam);
+                    iframe.src = nextPageUrl.toString();
+                })
+                .catch(() => {
+                    // Keep the last-known-good iframe visible when either request fails.
+                })
+                .finally(() => {
+                    revalidationInFlight = null;
+                });
+            return revalidationInFlight;
+        }
+
+        window.addEventListener('message', (event) => {
+            if (
+                event.source !== iframe.contentWindow ||
+                event.origin !== new URL(calendarFrameUrl).origin
+            ) {
+                return;
+            }
+            if (!event.data || event.data.type !== 'calendar-cache-stale') {
+                return;
+            }
+            revalidateStaleCalendar();
+        });
+
+        iframe.src = calendarFrameUrl;
 
         // Intercept and filter error messages from iframe
         // Note: This only works if iframe is same-origin
