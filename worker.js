@@ -277,14 +277,14 @@ function normalizeDate(dateValue) {
   if (typeof dateValue === 'string') {
     // Parse and return ISO string
     const date = new Date(dateValue);
-    return isNaN(date.getTime()) ? null : date.toISOString();
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
   }
   if (dateValue instanceof Date) {
     return dateValue.toISOString();
   }
   // Try to convert to date
   const date = new Date(dateValue);
-  return isNaN(date.getTime()) ? null : date.toISOString();
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
 /**
@@ -1278,7 +1278,8 @@ function scheduleFinalViewRefresh(cache, cacheKey, loadResponse, { enforceCooldo
   })();
 
   finalViewRefreshes.set(refreshKey, refreshPromise);
-  refreshPromise.then(() => {
+  // Cleanup is fire-and-forget; errors are already handled inside refreshPromise.
+  void refreshPromise.then(() => {
     if (finalViewRefreshes.get(refreshKey) === refreshPromise) {
       finalViewRefreshes.delete(refreshKey);
     }
