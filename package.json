@@ -42,7 +42,7 @@
   },
   "devDependencies": {
     "prettier": "^3.9.6",
-    "wrangler": "4.149.0"
+    "wrangler": "4.151.2"
   },
   "dependencies": {
     "fernet": "^0.3.3",
