@@ -46,7 +46,7 @@
   },
   "dependencies": {
     "fernet": "^0.3.3",
-    "glob": "13.0.6"
+    "glob": "14.0.2"
   },
   "pnpm": {
     "overrides": {
