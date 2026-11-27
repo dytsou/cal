@@ -1,0 +1,6 @@
+overrides:
+  sharp: ">=0.35.4"
+
+allowBuilds:
+  esbuild@0.28.2: true
+  workerd@1.20261116.1: true
